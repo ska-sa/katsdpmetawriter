@@ -32,60 +32,164 @@ import logging
 import asyncio
 import signal
 import time
+import multiprocessing
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 
 import boto
 import boto.s3.connection
 import katsdptelstate
 import katsdpservices
 import katsdpfilewriter
+from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply, Address
 
+# Template of key names that we would like to preserve when dumping
+# a lite version of Telstate. Since we always back observations with
+# a full dump of Telstate, we don't fail on missing entries, but do
+# log them.
+# Each string entry is format'ed with the following substitutions:
+#
+#    {cb}: The capture block ID which uniquely identifies this data capture
+#    {sn}: The name of a specific stream in the capture (e.g. sdp_l0)
+#    m???: A special that represents a glob-style pattern match used to
+#          do wildcard antenna name matching for certain keys.
+#
+LITE_KEYS = [
+    "{sn}_int_time",
+    "{sn}_bls_ordering",
+    "{sn}_n_chans",
+    "{sn}_bandwidth",
+    "{sn}_center_freq",
+    "{sn}_ceph_conf",
+    "{sn}_ceph_pool",
+    "{sn}_s3_endpoint",
+    "{cb}_{sn}_timestamps",
+    "{cb}_{sn}_correlator_data",
+    "{cb}_{sn}_weights",
+    "{cb}_{sn}_weights_channel",
+    "{cb}_{sn}_flags",
+    "obs_params",
+    "obs_script_log",
+    "obs_label",
+    "sub_pool_resources",
+    "sub_band",
+    "sub_product",
+    "m???_observer",
+    "m???_activity",
+    "m???_target",
+    "cbf_target"
+]
 
-def get_s3_bucket(s3_args):
-    """Small helper class to establish a connection to the specified S3
-       gateway and return a reference to the bucket required.
+def make_boto_dict(args):
+    """Create a dict of keyword parameters suitable
+    for passing into a boto.connect_s3 call using the 
+    supplied args."""
+    return {
+            "aws_access_key_id": s3_args.access_key,
+            "aws_secret_access_key": s3_args.secret_key,
+            "host": s3_args.host,
+            "port": s3_args.port,
+            "is_secure": False,
+            "calling_format": boto.s3.connection.OrdinaryCallingFormat()
+           }
 
-       Rewrites a number of exceptions into a more human readable log messages.
-       In the Mesos context, it is more useful to have accurate error messages
-       in the logs than allow the exceptions to bubble up.
+def generate_lite_keys(telstate, capture_block_id, stream_name):
+    """Uses capture_block_id and stream_name, along with the template
+    of keys to store in the lite dump, to build a full list of the keys
+    to be dumped.
+    Note: We avoid using telstate views here since we want to write fully
+    qualified keys into the lite database to easily allow merge later on.
+    The philosophy of the lite dump is to change as little as possible.
     """
-        # Attempt connection to S3 gateway and validate supplied bucket name
-    s3_conn = boto.connect_s3(
-                aws_access_key_id = s3_args.access_key,
-                aws_secret_access_key = s3_args.secret_key,
-                host = s3_args.host,
-                port = s3_args.port,
-                is_secure = False,
-                calling_format = boto.s3.connection.OrdinaryCallingFormat()
-               )
+    keys = []
+    for key in LITE_KEYS:
+        if key.find('?') >= 0:
+            keys.extend(telstate.filter(key))
+        else:   
+            keys.append(key.format(cb=capture_block_id, sn=stream_name))
+    return keys
+        
+
+def get_s3_connection(boto_dict):
+    """Test the connection to S3 as described in the args, and return
+    the current user id and the connection object.
+
+    Returns
+    -------
+    s3_conn : S3Connection
+        A connection to the s3 endpoint. None if a connection error occurred.
+    user_id : string
+        The canonical user id of this access key. None if a connection error occurred.
+    """
+    user_id = None
+    s3_conn = boto.connect_s3(**boto_dict)
     try:
-        user_id = s3_conn.get_canonical_user_id()
-         # tests the connection and useful in log messages
-        bucket = s3_conn.get_bucket(s3_args.bucket)
-        return (user_id, bucket)
+        s3_conn.get_canonical_user_id()
+         # reliable way to test connection and access keys
+        return s3_conn
     except socket.error as e:
         if e.errno != errno.ECONNREFUSED:
             raise e
-        logger.error("Failed to connect to S3 host {}:{}. Please check network and host address.".format(s3_args.host, s3_args.port))
+        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", s3_args.host, s3_args.port)
     except boto.exception.S3ResponseError as e:
         if e.error_code == u'InvalidAccessKeyId':
-            logger.error("Supplied access key ({}) is not a valid S3 user.".format(s3_args.access_key))
+            logger.error("Supplied access key %s is not a valid S3 user.", s3_args.access_key)
         if e.error_code == u'SignatureDoesNotMatch':
             logger.error("Supplied secret key is not valid for specified user.")
+        if e.status == 403 or e.status == 409:
+            logger.error("Supplied access key (%s) has no permissions on this server.", s3_args.access_key)
+    return None
+
+def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
+    keys = generate_lite_keys(telstate, capture_block_id, stream_name)
+    dump_filename = "{bp}/{cb}/{cb}_{sn}".format(bp=bucket_prefix, cb=capture_block_id, sn=stream_name)
+
+    logger.info("Writing {} keys to local RDB dump {}".format(len(keys), dump_filename))
+    
+    rdbw = RDBWriter(client=telstate._r)
+    (written, errors) = rdbw.save(dump_filename, keys=keys)
+
+    logger.info("Write complete. {} errors".format(errors))
+    return dump_filename
+
+def _store_lite_rdb(bucket_name, dump_filename, boto_dict);
+    s3_conn = get_s3_connection(boto_dict)
+    key_name = os.path.basename(dump_filename)
+    file_size = os.path.getsize(dump_filename)
+
+    if not s3_conn:
+        logger.error("Unable to store RDB dump in S3.")
+        return False
+    written_bytes = 0
+    try:
+        s3_conn.create_bucket(bucket_name)
+        bucket = s3_conn.get_bucket(bucket_name)
+        k = bucket.create_key(key_name)
+        written_bytes = k.set_contents_from_filename(dump_filename)
+    except boto.exception.S3ResponseError as e:
+        if e.status == 409:
+            logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s", 
+                         boto_dict["aws_access_key_id"], bucket_name)
+            return False
         if e.status == 404:
-            logger.error("Specified bucket ({}) not found.".format(s3_args.bucket))
-    return (None, None)
+            logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", bucket_name, key_name)
+            return False
+    if written_bytes != file_size:
+        logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
+        return False
+    return True
 
 class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpfilewriter-" + katsdpfilewriter.__version__
 
 
-    def __init__(self, host, port, loop, logger, telstate_l0, bucket):
-        self._telstate_l0 = telstate_l0
-        self._bucket = bucket
+    def __init__(self, host, port, loop, executor, logger, boto_dict):
+        self._boto_dict = boto_dict
         self._loop = loop
         self._async_task = None
+        self._executor = executor
 
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
@@ -121,16 +225,27 @@ class MetaWriterServer(DeviceServer):
         if self._async_task is future:
             self._async_task = None
 
-    async def _write_meta(self, capture_block_id, light=True):
+    def _write_meta(self, capture_block_id, light=True):
         """Write metadaya extracted from the current telstate object
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
         written = 0
-        for x in range(20):
-            await asyncio.sleep(1.0, loop=self.loop)
-            written += 1
-        return written
+        writes = []
+
+        chunks = range(20)
+        total_b = 0
+    
+        #for chunk in chunks:
+        #    total_b += yield from loop.run_in_executor(None, _s3_write, 2)
+
+        for chunk in chunks:
+            writes.append(loop.run_in_executor(self._executor, _s3_write, 2))
+
+        for write in writes: 
+            total_b += yield from write
+
+        return total_b
     
     async def write_light_meta(self, capture_block_id):
         """Implementation of request_write_light_meta."""
@@ -144,7 +259,7 @@ class MetaWriterServer(DeviceServer):
         return size_mb
 
         
-    async def request_write_light_meta(self, ctx, capture_block_id: str) -> str:
+    async def request_write_light_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
         """Write a lightweight variant of the currently active telescope state to the already
         specified S3 bucket. If a capture_block_id is specified, this is used to produce a
         view on the telstate object specific to that block.
@@ -153,8 +268,11 @@ class MetaWriterServer(DeviceServer):
         Parameters
         ----------
         capture_block_id : string
-            The capture block id generated by master controller (or supplied by CAM) to identify a
-            specific data capture.
+            The capture block id generated by master controller to identify a
+            specific data capture. Typically this will be an integer representing the start time of
+            the observation in epoch seconds (+/- to allow for uniqueness if required).
+        stream_name : string
+            The specific stream name to use in extracting stream specific meta-data. (e.g. sdp_l0)
 
         Returns
         -------
@@ -163,16 +281,16 @@ class MetaWriterServer(DeviceServer):
         timing : str
             The capture duration (and resultant MBps)
         """
-        ctx.inform("Starting write of lightweight metadata for CB: {} to S3. This may take a minute or two..."
-                   .format(capture_block_id))
+        ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
+                   capture_block_id, stream_name)
         st = time.time()
-        size_mb = await self.write_light_meta(capture_block_id)
+        size_mb = await self.write_light_meta(capture_block_id, stream_name)
         duration_s = time.time() - st
         return "Lightweight meta-data for CB: {} written to S3 in {}s @ {}MBps".format(capture_block_id, duration_s, size_mb / duration_s)
 
     async def request_hello(self, ctx) -> None:
         """This is a hello"""
-        ctx.informs(["One","Tow","Three"])
+        ctx.informs(["One","Two","Three"])
 
     async def request_fail(self, ctx) -> None:
         """This is a fail..."""
@@ -216,18 +334,25 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    #(user_id, bucket) = get_s3_bucket(args)
-     # Attempt connection to S3 gateway and validate supplied bucket name
+    boto_dict = make_boto_dict(args)
 
-    #if user_id is None: sys.exit(1)
-     # crash out in this early phase to let the system know we are not running 
+    s3_conn = get_s3_connection(boto_dict)
+    if not s3_conn:
+        logger.error("Exiting due to failure to establish connection to S3 endpoint (%s)".format(boto_dict))
+        sys.exit(2)
 
-    logger.info("Successfully tested connection to S3 endpoint. Meta-data dumps will be written to bucket: {}".format(args.bucket))
-    telstate_l0 = None #args.telstate.view(args.l0_name)
+    user_id = s3_conn.get_canonical_user_id()
+    s3_conn.close()
+     # we rebuild the connection each time we want to write a meta-data dump
+
+    logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
+    #telstate_l0 = args.telstate.view(args.l0_name)
 
     loop = asyncio.get_event_loop()
 
-    server = MetaWriterServer(args.host, args.port, loop, logger, telstate_l0, args.bucket)
+    executor = ProcessPoolExecutor()
+
+    server = MetaWriterServer(args.host, args.port, loop, executor, logger, boto_dict)
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))

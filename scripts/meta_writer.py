@@ -153,14 +153,14 @@ def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
     logger.info("Write complete. {} errors".format(errors))
     return dump_filename
 
-def _store_lite_rdb(bucket_name, dump_filename, boto_dict);
+def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
     s3_conn = get_s3_connection(boto_dict)
     key_name = os.path.basename(dump_filename)
     file_size = os.path.getsize(dump_filename)
 
     if not s3_conn:
         logger.error("Unable to store RDB dump in S3.")
-        return False
+        return None
     written_bytes = 0
     try:
         s3_conn.create_bucket(bucket_name)
@@ -171,14 +171,14 @@ def _store_lite_rdb(bucket_name, dump_filename, boto_dict);
         if e.status == 409:
             logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s", 
                          boto_dict["aws_access_key_id"], bucket_name)
-            return False
+            return None
         if e.status == 404:
             logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", bucket_name, key_name)
-            return False
+            return None
     if written_bytes != file_size:
         logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
-        return False
-    return True
+        return None
+    return written_bytes
 
 class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
@@ -226,26 +226,19 @@ class MetaWriterServer(DeviceServer):
             self._async_task = None
 
     def _write_meta(self, capture_block_id, light=True):
-        """Write metadaya extracted from the current telstate object
+        """Write meta-data extracted from the current telstate object
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
-        written = 0
-        writes = []
-
-        chunks = range(20)
-        total_b = 0
+        dump_filename = yield from loop.run_in_executor(self._executor, _write_lite_rdb, telstate, capture_block_id, stream_name, bucket_prefix)
+        if not dump_filename:
+            raise FailReply("Failed to write Telstate keys to RDB file.")
     
-        #for chunk in chunks:
-        #    total_b += yield from loop.run_in_executor(None, _s3_write, 2)
-
-        for chunk in chunks:
-            writes.append(loop.run_in_executor(self._executor, _s3_write, 2))
-
-        for write in writes: 
-            total_b += yield from write
-
-        return total_b
+        written_b = yield from loop.run_in_executor(self._executor, _store_lite_rdb, bucket_name, dump_filename, boto_dict) 
+        if not written_b:
+            raise FailReply("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
+         
+        return written_b
     
     async def write_light_meta(self, capture_block_id):
         """Implementation of request_write_light_meta."""
@@ -253,11 +246,10 @@ class MetaWriterServer(DeviceServer):
         task = asyncio.ensure_future(self._write_meta(capture_block_id, light=True), loop=self._loop)
         self._async_task = task
         try:
-            size_mb = await task
+            written_b = await task
         finally:
             self._clear_async_task(task)
-        return size_mb
-
+        return written_b
         
     async def request_write_light_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
         """Write a lightweight variant of the currently active telescope state to the already
@@ -284,9 +276,9 @@ class MetaWriterServer(DeviceServer):
         ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
                    capture_block_id, stream_name)
         st = time.time()
-        size_mb = await self.write_light_meta(capture_block_id, stream_name)
+        written_b = await self.write_light_meta(capture_block_id, stream_name)
         duration_s = time.time() - st
-        return "Lightweight meta-data for CB: {} written to S3 in {}s @ {}MBps".format(capture_block_id, duration_s, size_mb / duration_s)
+        return "Lightweight meta-data for CB: {} written to S3 in {}s @ {}MBps".format(capture_block_id, duration_s, written_b / 1e6 / duration_s)
 
     async def request_hello(self, ctx) -> None:
         """This is a hello"""

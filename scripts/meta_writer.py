@@ -25,6 +25,7 @@ The second is a complete dump of the entire TS, in the Redis case using the BGSA
 command to produce a complete RDB file. This may contain meta-data from other capture sessions.
 """
 
+import os
 import socket
 import sys
 import errno
@@ -81,15 +82,15 @@ LITE_KEYS = [
     "cbf_target"
 ]
 
-def make_boto_dict(args):
+def make_boto_dict(s3_args):
     """Create a dict of keyword parameters suitable
     for passing into a boto.connect_s3 call using the 
     supplied args."""
     return {
             "aws_access_key_id": s3_args.access_key,
             "aws_secret_access_key": s3_args.secret_key,
-            "host": s3_args.host,
-            "port": s3_args.port,
+            "host": s3_args.s3_host,
+            "port": s3_args.s3_port,
             "is_secure": False,
             "calling_format": boto.s3.connection.OrdinaryCallingFormat()
            }
@@ -105,7 +106,7 @@ def generate_lite_keys(telstate, capture_block_id, stream_name):
     keys = []
     for key in LITE_KEYS:
         if key.find('?') >= 0:
-            keys.extend(telstate.filter(key))
+            keys.extend(telstate.keys(filter=key))
         else:   
             keys.append(key.format(cb=capture_block_id, sn=stream_name))
     return keys
@@ -131,20 +132,26 @@ def get_s3_connection(boto_dict):
     except socket.error as e:
         if e.errno != errno.ECONNREFUSED:
             raise e
-        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", s3_args.host, s3_args.port)
+        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", boto_dict['host'], boto_dict['port'])
     except boto.exception.S3ResponseError as e:
         if e.error_code == u'InvalidAccessKeyId':
-            logger.error("Supplied access key %s is not a valid S3 user.", s3_args.access_key)
+            logger.error("Supplied access key %s is not a valid S3 user.", boto_dict['aws_access_key_id'])
         if e.error_code == u'SignatureDoesNotMatch':
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
-            logger.error("Supplied access key (%s) has no permissions on this server.", s3_args.access_key)
+            logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
     return None
 
 def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
     keys = generate_lite_keys(telstate, capture_block_id, stream_name)
-    dump_filename = "{bp}/{cb}/{cb}_{sn}".format(bp=bucket_prefix, cb=capture_block_id, sn=stream_name)
-
+    dump_folder = os.path.join(bucket_prefix, capture_block_id)
+    dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
+    if not os.path.exists(dump_folder):
+        try:
+            os.mkdir(dump_folder)
+        except OSError as e:
+            logger.error("Failed to create dump folder %s", dump_folder)
+            return None
     logger.info("Writing {} keys to local RDB dump {}".format(len(keys), dump_filename))
     
     rdbw = RDBWriter(client=telstate._r)
@@ -165,7 +172,7 @@ def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
     try:
         s3_conn.create_bucket(bucket_name)
         bucket = s3_conn.get_bucket(bucket_name)
-        k = bucket.create_key(key_name)
+        k = bucket.new_key(key_name)
         written_bytes = k.set_contents_from_filename(dump_filename)
     except boto.exception.S3ResponseError as e:
         if e.status == 409:
@@ -232,23 +239,24 @@ class MetaWriterServer(DeviceServer):
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
-        dump_filename = yield from loop.run_in_executor(self._executor, _write_lite_rdb, self.telstate, capture_block_id, stream_name, self.rdb_path)
+        dump_filename = yield from loop.run_in_executor(None, _write_lite_rdb, self._telstate, capture_block_id, stream_name, self._rdb_path)
         if not dump_filename:
             raise FailReply("Failed to write Telstate keys to RDB file.")
 
-        written_b = yield from loop.run_in_executor(self._executor, _store_lite_rdb, capture_block_id, dump_filename, boto_dict) 
+        written_b = yield from loop.run_in_executor(None, _store_lite_rdb, capture_block_id, dump_filename, boto_dict) 
          # write RDB into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
 
         if not written_b:
-            raise FailReply("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
+            logger.error("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
+        else:
+            logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
          
         return written_b
     
     async def write_light_meta(self, capture_block_id, stream_name):
         """Implementation of request_write_light_meta."""
-        self._fail_if_busy()
         task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, light=True), loop=self._loop)
         self._async_task = task
         try:
@@ -279,20 +287,16 @@ class MetaWriterServer(DeviceServer):
         timing : str
             The capture duration (and resultant MBps)
         """
+        self._fail_if_busy()
         ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
                    capture_block_id, stream_name)
         st = time.time()
         written_b = await self.write_light_meta(capture_block_id, stream_name)
+        if not written_b:
+            return "Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
+                    but will be moved independently once the link is restored".format(capture_block_id, stream_name)
         duration_s = time.time() - st
-        return "Lightweight meta-data for CB: {} written to S3 in {}s @ {}MBps".format(capture_block_id, duration_s, written_b / 1e6 / duration_s)
-
-    async def request_hello(self, ctx) -> None:
-        """This is a hello"""
-        ctx.informs(["One","Two","Three"])
-
-    async def request_fail(self, ctx) -> None:
-        """This is a fail..."""
-        raise FailReply("This is a fail...")
+        return "Lightweight meta-data for CB: {}_{} written to S3 in {}s @ {}MBps".format(capture_block_id, stream_name, duration_s, written_b / 1e6 / duration_s)
 
 
 def on_shutdown(loop, server):
@@ -332,11 +336,16 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    boto_dict = make_boto_dict(args)
+    if not os.path.exists(args.rdb_path):
+        logger.error("Specified RDB path, %s, does not exist.", args.rdb_path)
+        sys.exit(2)
 
+    boto_dict = make_boto_dict(args)
+    logger.info("Using boto dict: {}".format(boto_dict))
     s3_conn = get_s3_connection(boto_dict)
     if not s3_conn:
-        logger.error("Exiting due to failure to establish connection to S3 endpoint (%s)".format(boto_dict))
+        logger.error("Exiting due to failure to establish connection to S3 endpoint")
+         # get_s3_connection will have already logged the reason for failure
         sys.exit(2)
 
     user_id = s3_conn.get_canonical_user_id()

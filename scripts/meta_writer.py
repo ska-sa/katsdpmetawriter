@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """Serialise a view of the Telescope State for the current observation to long term storage.
 
@@ -9,11 +9,11 @@ comprise the visibility data captured for an observation.
 
 The MeerKAT data access library (katdal) uses the TS effectively as the 'file'
 representation of an observation. Such a 'file' can be opened by pointing katdal to either
-a live TS repository (currently Redis backed) or to a serialised representation
+a live TS repository (currently Redis-backed) or to a serialised representation
 of the TS (currently supports Redis RDB format).
 
 This writer, when requested, can create two different views of the TS and save these into
-long term storage.
+long-term storage.
 
 The first view is a lightweight representation of the TS containing the basic data
 to allow katdal to open an observation. This includes data such as captured timestamps,
@@ -33,7 +33,7 @@ import logging
 import asyncio
 import signal
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 import boto
 import boto.s3.connection
@@ -92,7 +92,7 @@ def make_boto_dict(s3_args):
            }
 
 
-def generate_lite_keys(telstate, capture_block_id, stream_name):
+def get_lite_keys(telstate, capture_block_id, stream_name):
     """Uses capture_block_id and stream_name, along with the template
     of keys to store in the lite dump, to build a full list of the keys
     to be dumped.
@@ -128,9 +128,9 @@ def get_s3_connection(boto_dict):
             raise e
         logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", boto_dict['host'], boto_dict['port'])
     except boto.exception.S3ResponseError as e:
-        if e.error_code == u'InvalidAccessKeyId':
+        if e.error_code == 'InvalidAccessKeyId':
             logger.error("Supplied access key %s is not a valid S3 user.", boto_dict['aws_access_key_id'])
-        if e.error_code == u'SignatureDoesNotMatch':
+        if e.error_code == 'SignatureDoesNotMatch':
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
             logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
@@ -138,21 +138,16 @@ def get_s3_connection(boto_dict):
 
 
 def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
-    keys = generate_lite_keys(telstate, capture_block_id, stream_name)
+    keys = get_lite_keys(telstate, capture_block_id, stream_name)
     dump_folder = os.path.join(bucket_prefix, capture_block_id)
     dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
-    if not os.path.exists(dump_folder):
-        try:
-            os.mkdir(dump_folder)
-        except OSError as e:
-            logger.error("Failed to create dump folder %s", dump_folder)
-            return None
-    logger.info("Writing {} keys to local RDB dump {}".format(len(keys), dump_filename))
+    os.makedirs(dump_folder, exist_ok=True)
+    logger.info("Writing %d keys to local RDB dump %s", len(keys), dump_filename)
 
     rdbw = RDBWriter(client=telstate._r)
     (written, errors) = rdbw.save(dump_filename, keys=keys)
-
-    logger.info("Write complete. {} errors".format(errors))
+    time.sleep(5)
+    logger.info("Write complete. %s errors", errors)
     return dump_filename
 
 
@@ -188,9 +183,8 @@ class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpfilewriter-" + katsdpfilewriter.__version__
 
-    def __init__(self, host, port, loop, executor, logger, boto_dict, rdb_path, telstate):
+    def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate):
         self._boto_dict = boto_dict
-        self._loop = loop
         self._async_task = None
         self._executor = executor
         self._rdb_path = rdb_path
@@ -202,7 +196,7 @@ class MetaWriterServer(DeviceServer):
         self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
 
-        super().__init__(host, port)
+        super().__init__(host, port, loop=loop)
 
         self.sensors.add(self._device_status_sensor)
         self.sensors.add(self._last_write_stream_sensor)
@@ -231,30 +225,30 @@ class MetaWriterServer(DeviceServer):
         if self._async_task is future:
             self._async_task = None
 
-    def _write_meta(self, capture_block_id, stream_name, light=True):
+    async def _write_meta(self, capture_block_id, stream_name, lite=True):
         """Write meta-data extracted from the current telstate object
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
-        dump_filename = yield from loop.run_in_executor(None, _write_lite_rdb, self._telstate, capture_block_id, stream_name, self._rdb_path)
+        dump_filename = await self.loop.run_in_executor(self._executor, _write_lite_rdb, self._telstate, capture_block_id, stream_name, self._rdb_path)
         if not dump_filename:
             raise FailReply("Failed to write Telstate keys to RDB file.")
 
-        written_b = yield from loop.run_in_executor(None, _store_lite_rdb, capture_block_id, dump_filename, boto_dict)
+        written_b = await self.loop.run_in_executor(self._executor, _store_lite_rdb, capture_block_id, dump_filename, boto_dict)
          # write RDB into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
 
         if not written_b:
-            logger.error("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
+            logger.error("Failed to store RDB dump %s in S3 endpoint", dump_filename)
         else:
             logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
 
         return written_b
 
-    async def write_light_meta(self, capture_block_id, stream_name):
-        """Implementation of request_write_light_meta."""
-        task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, light=True), loop=self._loop)
+    async def write_lite_meta(self, capture_block_id, stream_name):
+        """Implementation of request_write_lite_meta."""
+        task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, lite=True), loop=self.loop)
         self._async_task = task
         try:
             written_b = await task
@@ -262,8 +256,8 @@ class MetaWriterServer(DeviceServer):
             self._clear_async_task(task)
         return written_b
 
-    async def request_write_light_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
-        """Write a lightweight variant of the currently active telescope state to the already
+    async def request_write_lite_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
+        """Write a liteweight variant of the currently active telescope state to the already
         specified S3 bucket. If a capture_block_id is specified, this is used to produce a
         view on the telstate object specific to that block.
         Method may take some time so is run asychronously.
@@ -285,10 +279,10 @@ class MetaWriterServer(DeviceServer):
             The capture duration (and resultant MBps)
         """
         self._fail_if_busy()
-        ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
+        ctx.inform("Starting write of liteweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
                    capture_block_id, stream_name)
         st = time.time()
-        written_b = await self.write_light_meta(capture_block_id, stream_name)
+        written_b = await self.write_lite_meta(capture_block_id, stream_name)
         if not written_b:
             return "Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
                     but will be moved independently once the link is restored".format(capture_block_id, stream_name)
@@ -322,11 +316,11 @@ if __name__ == '__main__':
                         help='S3 access key with write permission to the specified bucket. Default is unauthenticated access')
     parser.add_argument('--secret-key', default="", metavar='SECRET',
                         help='S3 secret key for the specified access key. Default is unauthenticated access')
-    parser.add_argument('--s3_host', default='localhost', metavar='HOST',
+    parser.add_argument('--s3-host', default='localhost', metavar='HOST',
                         help='S3 gateway host address [default=%(default)s]')
-    parser.add_argument('--s3_port', default=7480, metavar='PORT',
+    parser.add_argument('--s3-port', default=7480, metavar='PORT',
                         help='S3 gateway port [default=%(default)s]')
-    parser.add_argument('-p', '--port', type=int, default=2047, metavar='N',
+    parser.add_argument('-p', '--port', type=int, default=2049, metavar='N',
                         help='KATCP host port [default=%(default)s]')
     parser.add_argument('-a', '--host', default="", metavar='HOST',
                         help='KATCP host address [default=all hosts]')
@@ -338,7 +332,6 @@ if __name__ == '__main__':
         sys.exit(2)
 
     boto_dict = make_boto_dict(args)
-    logger.info("Using boto dict: {}".format(boto_dict))
     s3_conn = get_s3_connection(boto_dict)
     if not s3_conn:
         logger.error("Exiting due to failure to establish connection to S3 endpoint")
@@ -352,9 +345,9 @@ if __name__ == '__main__':
     logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
 
     loop = asyncio.get_event_loop()
-    executor = ProcessPoolExecutor()
+    executor = ThreadPoolExecutor(1)
 
-    server = MetaWriterServer(args.host, args.port, loop, executor, logger, boto_dict, args.rdb_path, args.telstate)
+    server = MetaWriterServer(args.host, args.port, loop, executor, boto_dict, args.rdb_path, args.telstate)
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))

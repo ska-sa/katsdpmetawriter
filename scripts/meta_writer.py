@@ -2,7 +2,7 @@
 
 """Serialise a view of the Telescope State for the current observation to long term storage.
 
-The Telescope State (TS) is a meta-data repository that includes information about the 
+The Telescope State (TS) is a meta-data repository that includes information about the
 current state of the wide telescope, configuration data and intermediate SDP products
 such as calibration solutions. It also contains references to the data objects that
 comprise the visibility data captured for an observation.
@@ -33,17 +33,14 @@ import logging
 import asyncio
 import signal
 import time
-import multiprocessing
-import tempfile
 from concurrent.futures import ProcessPoolExecutor
 
 import boto
 import boto.s3.connection
-import katsdptelstate
 import katsdpservices
 import katsdpfilewriter
 from katsdptelstate.rdb_writer import RDBWriter
-from aiokatcp import DeviceServer, Sensor, FailReply, Address
+from aiokatcp import DeviceServer, Sensor, FailReply
 
 # Template of key names that we would like to preserve when dumping
 # a lite version of Telstate. Since we always back observations with
@@ -82,10 +79,9 @@ LITE_KEYS = [
     "cbf_target"
 ]
 
+
 def make_boto_dict(s3_args):
-    """Create a dict of keyword parameters suitable
-    for passing into a boto.connect_s3 call using the 
-    supplied args."""
+    """Create a dict of keyword parameters suitable for passing into a boto.connect_s3 call using the supplied args."""
     return {
             "aws_access_key_id": s3_args.access_key,
             "aws_secret_access_key": s3_args.secret_key,
@@ -94,6 +90,7 @@ def make_boto_dict(s3_args):
             "is_secure": False,
             "calling_format": boto.s3.connection.OrdinaryCallingFormat()
            }
+
 
 def generate_lite_keys(telstate, capture_block_id, stream_name):
     """Uses capture_block_id and stream_name, along with the template
@@ -107,10 +104,10 @@ def generate_lite_keys(telstate, capture_block_id, stream_name):
     for key in LITE_KEYS:
         if key.find('?') >= 0:
             keys.extend(telstate.keys(filter=key))
-        else:   
+        else:
             keys.append(key.format(cb=capture_block_id, sn=stream_name))
     return keys
-        
+
 
 def get_s3_connection(boto_dict):
     """Test the connection to S3 as described in the args, and return
@@ -120,10 +117,7 @@ def get_s3_connection(boto_dict):
     -------
     s3_conn : S3Connection
         A connection to the s3 endpoint. None if a connection error occurred.
-    user_id : string
-        The canonical user id of this access key. None if a connection error occurred.
     """
-    user_id = None
     s3_conn = boto.connect_s3(**boto_dict)
     try:
         s3_conn.get_canonical_user_id()
@@ -142,6 +136,7 @@ def get_s3_connection(boto_dict):
             logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
     return None
 
+
 def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
     keys = generate_lite_keys(telstate, capture_block_id, stream_name)
     dump_folder = os.path.join(bucket_prefix, capture_block_id)
@@ -153,12 +148,13 @@ def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
             logger.error("Failed to create dump folder %s", dump_folder)
             return None
     logger.info("Writing {} keys to local RDB dump {}".format(len(keys), dump_filename))
-    
+
     rdbw = RDBWriter(client=telstate._r)
     (written, errors) = rdbw.save(dump_filename, keys=keys)
 
     logger.info("Write complete. {} errors".format(errors))
     return dump_filename
+
 
 def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
     s3_conn = get_s3_connection(boto_dict)
@@ -176,7 +172,7 @@ def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
         written_bytes = k.set_contents_from_filename(dump_filename)
     except boto.exception.S3ResponseError as e:
         if e.status == 409:
-            logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s", 
+            logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s",
                          boto_dict["aws_access_key_id"], bucket_name)
             return None
         if e.status == 404:
@@ -187,10 +183,10 @@ def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
         return None
     return written_bytes
 
+
 class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpfilewriter-" + katsdpfilewriter.__version__
-
 
     def __init__(self, host, port, loop, executor, logger, boto_dict, rdb_path, telstate):
         self._boto_dict = boto_dict
@@ -203,7 +199,7 @@ class MetaWriterServer(DeviceServer):
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
         self._device_status_sensor = Sensor(str, "status", "The current status of the meta writer process")
-        self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")    
+        self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
 
         super().__init__(host, port)
@@ -219,7 +215,8 @@ class MetaWriterServer(DeviceServer):
 
     def _fail_if_busy(self):
         """Raise a FailReply if there is an asynchronous operation in progress."""
-        if self.async_busy: raise FailReply('Meta-data writer is busy with an operation. Please wait for it to complete first.')
+        if self.async_busy:
+            raise FailReply('Meta-data writer is busy with an operation. Please wait for it to complete first.')
 
     def _clear_async_task(self, future):
         """Clear the current async task.
@@ -243,7 +240,7 @@ class MetaWriterServer(DeviceServer):
         if not dump_filename:
             raise FailReply("Failed to write Telstate keys to RDB file.")
 
-        written_b = yield from loop.run_in_executor(None, _store_lite_rdb, capture_block_id, dump_filename, boto_dict) 
+        written_b = yield from loop.run_in_executor(None, _store_lite_rdb, capture_block_id, dump_filename, boto_dict)
          # write RDB into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
@@ -252,9 +249,9 @@ class MetaWriterServer(DeviceServer):
             logger.error("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
         else:
             logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
-         
+
         return written_b
-    
+
     async def write_light_meta(self, capture_block_id, stream_name):
         """Implementation of request_write_light_meta."""
         task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, light=True), loop=self._loop)
@@ -264,13 +261,13 @@ class MetaWriterServer(DeviceServer):
         finally:
             self._clear_async_task(task)
         return written_b
-        
+
     async def request_write_light_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
         """Write a lightweight variant of the currently active telescope state to the already
         specified S3 bucket. If a capture_block_id is specified, this is used to produce a
         view on the telstate object specific to that block.
         Method may take some time so is run asychronously.
-        
+
         Parameters
         ----------
         capture_block_id : string
@@ -324,7 +321,7 @@ if __name__ == '__main__':
     parser.add_argument('--access-key', default="", metavar='ACCESS',
                         help='S3 access key with write permission to the specified bucket. Default is unauthenticated access')
     parser.add_argument('--secret-key', default="", metavar='SECRET',
-                        help='S3 secret key for the specified access key. Default is unauthenticated access') 
+                        help='S3 secret key for the specified access key. Default is unauthenticated access')
     parser.add_argument('--s3_host', default='localhost', metavar='HOST',
                         help='S3 gateway host address [default=%(default)s]')
     parser.add_argument('--s3_port', default=7480, metavar='PORT',

@@ -34,6 +34,7 @@ import asyncio
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 
 import boto
 import boto.s3.connection
@@ -41,6 +42,11 @@ import katsdpservices
 import katsdpfilewriter
 from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
+
+# Fairly arbitrary limit on number of concurrent meta data writes
+# that we allow. Tradeoff between not stopping observations and
+# taking too long to discover some blocking fault.
+MAX_ASYNC_TASKS = 10
 
 # Template of key names that we would like to preserve when dumping
 # a lite version of Telstate. Since we always back observations with
@@ -133,10 +139,9 @@ def get_s3_connection(boto_dict):
     return None
 
 
-def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
+def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto_dict, store=True):
     keys = get_lite_keys(telstate, capture_block_id, stream_name)
-    dump_folder = os.path.join(bucket_prefix, capture_block_id)
-    dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
+    dump_folder = os.path.dirname(dump_filename)
     os.makedirs(dump_folder, exist_ok=True)
     logger.info("Writing %d keys to local RDB dump %s", len(keys), dump_filename)
 
@@ -144,10 +149,8 @@ def _write_lite_rdb(telstate, capture_block_id, stream_name, bucket_prefix):
     (written, errors) = rdbw.save(dump_filename, keys=keys)
     time.sleep(5)
     logger.info("Write complete. %s errors", errors)
-    return dump_filename
+    ctx.inform("RDB extract and write for %s_%s complete. %s errors", capture_block_id, stream_name, errors)
 
-
-def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
     s3_conn = get_s3_connection(boto_dict)
     key_name = os.path.basename(dump_filename)
     file_size = os.path.getsize(dump_filename)
@@ -157,17 +160,17 @@ def _store_lite_rdb(bucket_name, dump_filename, boto_dict):
         return None
     written_bytes = 0
     try:
-        s3_conn.create_bucket(bucket_name)
-        bucket = s3_conn.get_bucket(bucket_name)
+        s3_conn.create_bucket(capture_block_id)
+        bucket = s3_conn.get_bucket(capture_block_id)
         k = bucket.new_key(key_name)
         written_bytes = k.set_contents_from_filename(dump_filename)
     except boto.exception.S3ResponseError as e:
         if e.status == 409:
             logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s",
-                         boto_dict["aws_access_key_id"], bucket_name)
+                         boto_dict["aws_access_key_id"], capture_block_id)
             return None
         if e.status == 404:
-            logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", bucket_name, key_name)
+            logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", capture_block_id, key_name)
             return None
     if written_bytes != file_size:
         logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
@@ -181,7 +184,7 @@ class MetaWriterServer(DeviceServer):
 
     def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate):
         self._boto_dict = boto_dict
-        self._async_task = None
+        self._async_tasks = deque()
         self._executor = executor
         self._rdb_path = rdb_path
         self._telstate = telstate
@@ -198,40 +201,37 @@ class MetaWriterServer(DeviceServer):
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
 
-    @property
-    def async_busy(self):
-        """Whether there is an asynchronous state-change operation in progress."""
-        return self._async_task is not None and not self._async_task.done()
-
     def _fail_if_busy(self):
-        """Raise a FailReply if there is an asynchronous operation in progress."""
-        if self.async_busy:
-            raise FailReply('Meta-data writer is busy with an operation. Please wait for it to complete first.')
+        """Raise a FailReply if there are two many asynchronous operations in progress."""
+        busy_tasks = 0
+        for task in self._async_tasks:
+            if not task.done():
+                busy_tasks += 1
+        if busy_tasks >= MAX_ASYNC_TASKS:
+            raise FailReply('Meta-data writer has too many operations in progress ({}/{}). Please wait for one to complete first.'.format(len(self._async_tasks), MAX_ASYNC_TASKS))
 
     def _clear_async_task(self, future):
-        """Clear the current async task.
+        """Clear the specified async task.
 
         Parameters
         ----------
         future : :class:`asyncio.Future`
-            The expected value of :attr:`_async_task`. If it does not match,
-            it is not cleared (this can happen if another task replaced it
-            already).
+            The expected value of :attr:`_async_task`.
         """
-        if self._async_task is future:
-            self._async_task = None
+        try:
+            self._async_tasks.remove(future)
+        except IndexError:
+            pass
 
-    async def _write_meta(self, capture_block_id, stream_name, lite=True):
+    async def _write_meta(self, ctx, capture_block_id, stream_name, lite=True):
         """Write meta-data extracted from the current telstate object
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
-        dump_filename = await self.loop.run_in_executor(self._executor, _write_lite_rdb, self._telstate, capture_block_id, stream_name, self._rdb_path)
-        if not dump_filename:
-            raise FailReply("Failed to write Telstate keys to RDB file.")
-
-        written_b = await self.loop.run_in_executor(self._executor, _store_lite_rdb, capture_block_id, dump_filename, boto_dict)
-         # write RDB into S3 - note that capture_block_id is used as the bucket name for storing meta-data
+        dump_folder = os.path.join(self._rdb_path, capture_block_id)
+        dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
+        written_b = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
+         # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
 
@@ -239,13 +239,13 @@ class MetaWriterServer(DeviceServer):
             logger.error("Failed to store RDB dump %s in S3 endpoint", dump_filename)
         else:
             logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
-
         return written_b
 
-    async def write_lite_meta(self, capture_block_id, stream_name):
+    async def write_lite_meta(self, ctx, capture_block_id, stream_name):
         """Implementation of request_write_lite_meta."""
-        task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, lite=True), loop=self.loop)
-        self._async_task = task
+        task = asyncio.ensure_future(self._write_meta(ctx, capture_block_id, stream_name, lite=True), loop=self.loop)
+        self._async_tasks.append(task)
+         # we check the queue depth before this point, so safe just to add it
         try:
             written_b = await task
         finally:
@@ -278,7 +278,7 @@ class MetaWriterServer(DeviceServer):
         ctx.inform("Starting write of liteweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
                    capture_block_id, stream_name)
         st = time.time()
-        written_b = await self.write_lite_meta(capture_block_id, stream_name)
+        written_b = await self.write_lite_meta(ctx, capture_block_id, stream_name)
         if not written_b:
             return "Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
                     but will be moved independently once the link is restored".format(capture_block_id, stream_name)
@@ -341,7 +341,7 @@ if __name__ == '__main__':
     logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
 
     loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(1)
+    executor = ThreadPoolExecutor(3)
 
     server = MetaWriterServer(args.host, args.port, loop, executor, boto_dict, args.rdb_path, args.telstate)
     logger.info("Started meta-data writer server.")

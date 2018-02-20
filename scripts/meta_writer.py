@@ -185,11 +185,13 @@ class MetaWriterServer(DeviceServer):
     BUILD_STATE = "katsdpfilewriter-" + katsdpfilewriter.__version__
 
 
-    def __init__(self, host, port, loop, executor, logger, boto_dict):
+    def __init__(self, host, port, loop, executor, logger, boto_dict, rdb_path, telstate):
         self._boto_dict = boto_dict
         self._loop = loop
         self._async_task = None
         self._executor = executor
+        self._rdb_path = rdb_path
+        self._telstate = telstate
 
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
@@ -225,25 +227,29 @@ class MetaWriterServer(DeviceServer):
         if self._async_task is future:
             self._async_task = None
 
-    def _write_meta(self, capture_block_id, light=True):
+    def _write_meta(self, capture_block_id, stream_name, light=True):
         """Write meta-data extracted from the current telstate object
         to a binary dump and place this in the currently connected
         S3 bucket for storage.
         """
-        dump_filename = yield from loop.run_in_executor(self._executor, _write_lite_rdb, telstate, capture_block_id, stream_name, bucket_prefix)
+        dump_filename = yield from loop.run_in_executor(self._executor, _write_lite_rdb, self.telstate, capture_block_id, stream_name, self.rdb_path)
         if not dump_filename:
             raise FailReply("Failed to write Telstate keys to RDB file.")
-    
-        written_b = yield from loop.run_in_executor(self._executor, _store_lite_rdb, bucket_name, dump_filename, boto_dict) 
+
+        written_b = yield from loop.run_in_executor(self._executor, _store_lite_rdb, capture_block_id, dump_filename, boto_dict) 
+         # write RDB into S3 - note that capture_block_id is used as the bucket name for storing meta-data
+         # regardless of the stream selected.
+         # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
+
         if not written_b:
             raise FailReply("Failed to store RDB dump {} in S3 endpoint".format(dump_filename))
          
         return written_b
     
-    async def write_light_meta(self, capture_block_id):
+    async def write_light_meta(self, capture_block_id, stream_name):
         """Implementation of request_write_light_meta."""
         self._fail_if_busy()
-        task = asyncio.ensure_future(self._write_meta(capture_block_id, light=True), loop=self._loop)
+        task = asyncio.ensure_future(self._write_meta(capture_block_id, stream_name, light=True), loop=self._loop)
         self._async_task = task
         try:
             written_b = await task
@@ -309,8 +315,8 @@ if __name__ == '__main__':
     katsdpservices.setup_restart()
 
     parser = katsdpservices.ArgumentParser()
-    parser.add_argument('--bucket', default='meerkat', metavar='BUCKET',
-                        help='S3 bucket in which to store meta-data dumps [default=%(default)s]')
+    parser.add_argument('--rdb-path', default="/var/kat/data", metavar='RDBPATH',
+                        help='Root in which to write RDB dumps.')
     parser.add_argument('--access-key', default="", metavar='ACCESS',
                         help='S3 access key with write permission to the specified bucket. Default is unauthenticated access')
     parser.add_argument('--secret-key', default="", metavar='SECRET',
@@ -338,13 +344,11 @@ if __name__ == '__main__':
      # we rebuild the connection each time we want to write a meta-data dump
 
     logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
-    #telstate_l0 = args.telstate.view(args.l0_name)
 
     loop = asyncio.get_event_loop()
-
     executor = ProcessPoolExecutor()
 
-    server = MetaWriterServer(args.host, args.port, loop, executor, logger, boto_dict)
+    server = MetaWriterServer(args.host, args.port, loop, executor, logger, boto_dict, args.rdb_path, args.telstate)
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))

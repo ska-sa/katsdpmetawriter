@@ -17,13 +17,8 @@ setup(
     install_requires=[
         'aiokatcp',
         'boto',
-        'h5py',
-        'numpy',
         'katsdptelstate',
-        'katsdpservices',
-        'hiredis',
-        'netifaces',
-        'futures'
+        'katsdpservices'
     ],
     use_katversion=True
 )

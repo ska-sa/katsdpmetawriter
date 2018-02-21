@@ -33,6 +33,7 @@ import logging
 import asyncio
 import signal
 import time
+import enum
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -147,7 +148,6 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
 
     rdbw = RDBWriter(client=telstate._r)
     (written, errors) = rdbw.save(dump_filename, keys=keys)
-    time.sleep(5)
     logger.info("Write complete. %s errors", errors)
     ctx.inform("RDB extract and write for %s_%s complete. %s errors", capture_block_id, stream_name, errors)
 
@@ -178,6 +178,11 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     return written_bytes
 
 
+class DeviceStatus(enum.Enum):
+    IDLE = 1
+    QUEUED = 2
+
+
 class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpfilewriter-" + katsdpfilewriter.__version__
@@ -191,12 +196,15 @@ class MetaWriterServer(DeviceServer):
 
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
-        self._device_status_sensor = Sensor(str, "status", "The current status of the meta writer process")
+        self._device_status_sensor = Sensor(DeviceStatus, "status", "The current status of the meta writer process")
         self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
 
         super().__init__(host, port, loop=loop)
 
+        self._build_state_sensor.set_value(self.BUILD_STATE)
+        self.sensors.add(self._build_state_sensor)
+        self._device_status_sensor.set_value('idle')
         self.sensors.add(self._device_status_sensor)
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
@@ -222,6 +230,8 @@ class MetaWriterServer(DeviceServer):
             self._async_tasks.remove(future)
         except IndexError:
             pass
+        if not self._async_tasks:
+            self._device_status_sensor.set_value('idle')
 
     async def _write_meta(self, ctx, capture_block_id, stream_name, lite=True):
         """Write meta-data extracted from the current telstate object
@@ -234,6 +244,8 @@ class MetaWriterServer(DeviceServer):
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
+        self._last_write_stream_sensor.set_value(stream_name)
+        self._last_write_cbid_sensor.set_value(capture_block_id)
 
         if not written_b:
             logger.error("Failed to store RDB dump %s in S3 endpoint", dump_filename)
@@ -275,7 +287,8 @@ class MetaWriterServer(DeviceServer):
             The capture duration (and resultant MBps)
         """
         self._fail_if_busy()
-        ctx.inform("Starting write of liteweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
+        self._device_status_sensor.set_value('queued')
+        ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
                    capture_block_id, stream_name)
         st = time.time()
         written_b = await self.write_lite_meta(ctx, capture_block_id, stream_name)
@@ -347,4 +360,5 @@ if __name__ == '__main__':
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))
+    executor.shutdown()
     loop.close()

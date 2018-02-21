@@ -204,6 +204,7 @@ class MetaWriterServer(DeviceServer):
         self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
         self._key_failures_sensor = Sensor(int, "key-failures", "Count of the number of failures to write a desired key to the RDB dump.")
+        self._last_transfer_rate = Sensor(float, "last-transfer-rate", "Rate of last data transfer to S3 endpoint in MBps.")
 
         super().__init__(host, port, loop=loop)
 
@@ -213,6 +214,7 @@ class MetaWriterServer(DeviceServer):
         self.sensors.add(self._device_status_sensor)
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
+        self.sensors.add(self._last_transfer_rate)
         self._key_failures_sensor.set_value(0)
         self.sensors.add(self._key_failures_sensor)
 
@@ -317,7 +319,8 @@ class MetaWriterServer(DeviceServer):
             return "Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
                     but will be moved independently once the link is restored".format(capture_block_id, stream_name)
         duration_s = time.time() - st
-        return "Lightweight meta-data for CB: {}_{} written to S3 in {}s @ {}MBps".format(capture_block_id, stream_name, duration_s, written_b / 1e6 / duration_s)
+        self._last_transfer_rate.set_value(written_b / 1e6 / duration_s)
+        return "Lightweight meta-data for CB: {}_{} written to S3 in {:.2f}s @ {:.2f}MBps".format(capture_block_id, stream_name, duration_s, written_b / 1e6 / duration_s)
 
 
 def on_shutdown(loop, server):

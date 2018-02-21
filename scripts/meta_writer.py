@@ -128,7 +128,7 @@ def get_s3_connection(boto_dict):
         return s3_conn
     except socket.error as e:
         if e.errno != errno.ECONNREFUSED:
-            raise e
+            raise
         logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", boto_dict['host'], boto_dict['port'])
     except boto.exception.S3ResponseError as e:
         if e.error_code == 'InvalidAccessKeyId':
@@ -149,7 +149,7 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     rdbw = RDBWriter(client=telstate._r)
     (written, errors) = rdbw.save(dump_filename, keys=keys)
     logger.info("Write complete. %s errors", errors)
-    ctx.inform("RDB extract and write for %s_%s complete. %s errors", capture_block_id, stream_name, errors)
+    ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, errors))
 
     s3_conn = get_s3_connection(boto_dict)
     key_name = os.path.basename(dump_filename)
@@ -204,13 +204,13 @@ class MetaWriterServer(DeviceServer):
 
         self._build_state_sensor.set_value(self.BUILD_STATE)
         self.sensors.add(self._build_state_sensor)
-        self._device_status_sensor.set_value('idle')
+        self._device_status_sensor.set_value(DeviceStatus.IDLE)
         self.sensors.add(self._device_status_sensor)
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
 
     def _fail_if_busy(self):
-        """Raise a FailReply if there are two many asynchronous operations in progress."""
+        """Raise a FailReply if there are too many asynchronous operations in progress."""
         busy_tasks = 0
         for task in self._async_tasks:
             if not task.done():
@@ -231,7 +231,7 @@ class MetaWriterServer(DeviceServer):
         except IndexError:
             pass
         if not self._async_tasks:
-            self._device_status_sensor.set_value('idle')
+            self._device_status_sensor.set_value(DeviceStatus.IDLE)
 
     async def _write_meta(self, ctx, capture_block_id, stream_name, lite=True):
         """Write meta-data extracted from the current telstate object
@@ -256,6 +256,7 @@ class MetaWriterServer(DeviceServer):
     async def write_lite_meta(self, ctx, capture_block_id, stream_name):
         """Implementation of request_write_lite_meta."""
         task = asyncio.ensure_future(self._write_meta(ctx, capture_block_id, stream_name, lite=True), loop=self.loop)
+        self._device_status_sensor.set_value(DeviceStatus.QUEUED)
         self._async_tasks.append(task)
          # we check the queue depth before this point, so safe just to add it
         try:
@@ -287,9 +288,8 @@ class MetaWriterServer(DeviceServer):
             The capture duration (and resultant MBps)
         """
         self._fail_if_busy()
-        self._device_status_sensor.set_value('queued')
-        ctx.inform("Starting write of lightweight metadata for CB: %s and Stream: %s to S3. This may take a minute or two...",
-                   capture_block_id, stream_name)
+        ctx.inform("Starting write of lightweight metadata for CB: {} and Stream: {} to S3. This may take a minute or two..."
+                   .format(capture_block_id, stream_name))
         st = time.time()
         written_b = await self.write_lite_meta(ctx, capture_block_id, stream_name)
         if not written_b:

@@ -246,7 +246,7 @@ class MetaWriterServer(DeviceServer):
         S3 bucket for storage.
         """
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
-        dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
+        dump_filename = os.path.join(dump_folder, "{}_{}.rdb.uploading".format(capture_block_id, stream_name))
         (written_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
@@ -257,9 +257,21 @@ class MetaWriterServer(DeviceServer):
             self._key_failures_sensor.set_value(self._key_failures_sensor.value + key_errors, Sensor.Status.ERROR)
 
         if not written_b:
-            logger.error("Failed to store RDB dump %s in S3 endpoint", dump_filename)
+            try:
+                trawler_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
+                 # prepare to rename file so that the trawler process can attempt the S3 upload at a later date
+                os.rename(dump_filename, trawler_filename)
+            except FileNotFoundError:
+                msg = "Failed to store RDP dump, and couldn't find file to rename. This error cannot be recovered from."
+                logger.error(msg)
+                raise FailReply(msg)
         else:
             logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
+            try:
+                os.remove(dump_filename)
+            except Exception as e:
+                logger.warning("Failed to remove transferred RDB file %s. (%s)", dump_filename, e)
+                 # it won't interfere with the trawler so we just continue
         return written_b
 
     async def write_lite_meta(self, ctx, capture_block_id, stream_name):

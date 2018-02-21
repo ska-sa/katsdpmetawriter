@@ -62,6 +62,7 @@ MAX_ASYNC_TASKS = 10
 #
 LITE_KEYS = [
     "{sn}_int_time",
+    "{sn}_sync_time",
     "{sn}_bls_ordering",
     "{sn}_n_chans",
     "{sn}_bandwidth",
@@ -73,6 +74,7 @@ LITE_KEYS = [
     "{cb}_obs_activity",
     "{cb}_{sn}_chunk_name",
     "{cb}_{sn}_chunk_info",
+    "{cb}_{sn}_first_timestamp",
     "sub_pool_resources",
     "sub_band",
     "sub_product",

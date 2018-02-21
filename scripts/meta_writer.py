@@ -118,6 +118,10 @@ def get_s3_connection(boto_dict):
     """Test the connection to S3 as described in the args, and return
     the current user id and the connection object.
 
+    In general we are more concerned with informing the user why the
+    connection failed, rather than raising exceptions. Users should always
+    check the return value and make appropriate decisions.
+
     Returns
     -------
     s3_conn : S3Connection
@@ -129,9 +133,7 @@ def get_s3_connection(boto_dict):
          # reliable way to test connection and access keys
         return s3_conn
     except socket.error as e:
-        if e.errno != errno.ECONNREFUSED:
-            raise
-        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address.", boto_dict['host'], boto_dict['port'])
+        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address. (%s)", boto_dict['host'], boto_dict['port'], e)
     except boto.exception.S3ResponseError as e:
         if e.error_code == 'InvalidAccessKeyId':
             logger.error("Supplied access key %s is not a valid S3 user.", boto_dict['aws_access_key_id'])
@@ -149,9 +151,9 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     logger.info("Writing %d keys to local RDB dump %s", len(keys), dump_filename)
 
     rdbw = RDBWriter(client=telstate._r)
-    (written, errors) = rdbw.save(dump_filename, keys=keys)
-    logger.info("Write complete. %s errors", errors)
-    ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, errors))
+    (written, key_errors) = rdbw.save(dump_filename, keys=keys)
+    logger.info("Write complete. %s errors", key_errors)
+    ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, key_errors))
 
     s3_conn = get_s3_connection(boto_dict)
     key_name = os.path.basename(dump_filename)
@@ -159,7 +161,7 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
 
     if not s3_conn:
         logger.error("Unable to store RDB dump in S3.")
-        return None
+        return (None, key_errors)
     written_bytes = 0
     try:
         s3_conn.create_bucket(capture_block_id)
@@ -170,14 +172,14 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
         if e.status == 409:
             logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s",
                          boto_dict["aws_access_key_id"], capture_block_id)
-            return None
+            return (None, key_errors)
         if e.status == 404:
             logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", capture_block_id, key_name)
-            return None
+            return (None, key_errors)
     if written_bytes != file_size:
         logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
-        return None
-    return written_bytes
+        return (None, None)
+    return (written_bytes, key_errors)
 
 
 class DeviceStatus(enum.Enum):
@@ -201,6 +203,7 @@ class MetaWriterServer(DeviceServer):
         self._device_status_sensor = Sensor(DeviceStatus, "status", "The current status of the meta writer process")
         self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
+        self._key_failures_sensor = Sensor(int, "key-failures", "Count of the number of failures to write a desired key to the RDB dump.")
 
         super().__init__(host, port, loop=loop)
 
@@ -210,6 +213,8 @@ class MetaWriterServer(DeviceServer):
         self.sensors.add(self._device_status_sensor)
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
+        self._key_failures_sensor.set_value(0)
+        self.sensors.add(self._key_failures_sensor)
 
     def _fail_if_busy(self):
         """Raise a FailReply if there are too many asynchronous operations in progress."""
@@ -218,7 +223,7 @@ class MetaWriterServer(DeviceServer):
             if not task.done():
                 busy_tasks += 1
         if busy_tasks >= MAX_ASYNC_TASKS:
-            raise FailReply('Meta-data writer has too many operations in progress ({}/{}). Please wait for one to complete first.'.format(len(self._async_tasks), MAX_ASYNC_TASKS))
+            raise FailReply('Meta-data writer has too many operations in progress (max {}). Please wait for one to complete first.'.format(MAX_ASYNC_TASKS))
 
     def _clear_async_task(self, future):
         """Clear the specified async task.
@@ -242,12 +247,14 @@ class MetaWriterServer(DeviceServer):
         """
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         dump_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
-        written_b = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
+        (written_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
         self._last_write_stream_sensor.set_value(stream_name)
         self._last_write_cbid_sensor.set_value(capture_block_id)
+        if key_errors > 0:
+            self._key_failures_sensor.set_value(self._key_failures_sensor.value + key_errors, Sensor.Status.ERROR)
 
         if not written_b:
             logger.error("Failed to store RDB dump %s in S3 endpoint", dump_filename)

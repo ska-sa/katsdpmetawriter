@@ -114,13 +114,16 @@ def get_lite_keys(telstate, capture_block_id, stream_name):
     return keys
 
 
-def get_s3_connection(boto_dict):
+def get_s3_connection(boto_dict, fail_on_boto=False):
     """Test the connection to S3 as described in the args, and return
     the current user id and the connection object.
 
     In general we are more concerned with informing the user why the
     connection failed, rather than raising exceptions. Users should always
     check the return value and make appropriate decisions.
+    
+    If set, fail_on_boto will not supress boto exceptions. Used when verifying
+    credentials.
 
     Returns
     -------
@@ -141,6 +144,7 @@ def get_s3_connection(boto_dict):
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
             logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
+        if fail_on_boto: raise
     return None
 
 
@@ -210,7 +214,7 @@ class MetaWriterServer(DeviceServer):
         self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
         self._key_failures_sensor = Sensor(int, "key-failures", "Count of the number of failures to write a desired key to the RDB dump.")
-        self._last_transfer_rate = Sensor(int, "last-transfer-rate", "Rate of last data transfer to S3 endpoint in bps.")
+        self._last_transfer_rate = Sensor(int, "last-transfer-rate", "Rate of last data transfer to S3 endpoint in Bps.")
 
         super().__init__(host, port, loop=loop)
 
@@ -297,7 +301,7 @@ class MetaWriterServer(DeviceServer):
             rate_per_stream[stream] = rate_b
         return rate_per_stream
 
-    async def request_write_lite_meta(self, ctx, capture_block_id: str, stream_name: str = None) -> str:
+    async def request_write_lite_meta(self, ctx, capture_block_id: str, stream_name: str = None) -> None:
         """Write a liteweight variant of the currently active telescope state to the already
         specified S3 bucket. If a capture_block_id is specified, this is used to produce a
         view on the telstate object specific to that block.
@@ -385,17 +389,15 @@ if __name__ == '__main__':
         sys.exit(2)
 
     boto_dict = make_boto_dict(args)
-    s3_conn = get_s3_connection(boto_dict)
-    if not s3_conn:
-        logger.error("Exiting due to failure to establish connection to S3 endpoint")
-         # get_s3_connection will have already logged the reason for failure
-        sys.exit(2)
+    s3_conn = get_s3_connection(boto_dict, fail_on_boto=True)
 
-    user_id = s3_conn.get_canonical_user_id()
-    s3_conn.close()
-     # we rebuild the connection each time we want to write a meta-data dump
-
-    logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
+    if s3_conn:
+        user_id = s3_conn.get_canonical_user_id()
+        s3_conn.close()
+         # we rebuild the connection each time we want to write a meta-data dump
+        logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
+    else:
+        logger.warning("S3 endpoint %s:%s not available. Files will only be written locally.", args.s3_host, args.s3_port)
 
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(3)

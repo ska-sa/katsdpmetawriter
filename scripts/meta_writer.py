@@ -122,7 +122,7 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     connection failed, rather than raising exceptions. Users should always
     check the return value and make appropriate decisions.
     
-    If set, fail_on_boto will not supress boto exceptions. Used when verifying
+    If set, fail_on_boto will not suppress boto exceptions. Used when verifying
     credentials.
 
     Returns

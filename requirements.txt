@@ -3,6 +3,7 @@ boto==2.48.0
 decorator==4.2.1          # via aiokatcp
 fakenewsredis==0.10.0
 ipaddress==1.0.19
+katversion
 netifaces==0.10.6
 numpy==1.14.1
 redis==2.10.6             # via fakenewsredis

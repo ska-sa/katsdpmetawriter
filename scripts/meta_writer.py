@@ -162,6 +162,9 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     logger.info("Write complete. %s errors", key_errors)
     ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, key_errors))
 
+    if not boto_dict:
+        return (None, key_errors)
+
     s3_conn = get_s3_connection(boto_dict)
     key_name = os.path.basename(dump_filename)
     file_size = os.path.getsize(dump_filename)
@@ -339,8 +342,7 @@ class MetaWriterServer(DeviceServer):
         peak_rate = 0
         for stream, rate_b in rate_per_stream.items():
             if not rate_b:
-                ctx.inform("Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
-                            but will be moved independently once the link is restored".format(capture_block_id, stream))
+                ctx.inform("Lightweight meta-data for CB: {}_{} written to local disk only".format(capture_block_id, stream))
             else:
                 ctx.inform("Lightweight meta-data for CB: {}_{} written to S3 @ {:.2f}MBps".format(capture_block_id, stream, rate_b / 1e6))
                 peak_rate = max(peak_rate, rate_b)
@@ -369,6 +371,8 @@ if __name__ == '__main__':
     parser = katsdpservices.ArgumentParser()
     parser.add_argument('--rdb-path', default="/var/kat/data", metavar='RDBPATH',
                         help='Root in which to write RDB dumps.')
+    parser.add_argument('--store-s3', dest='store_s3', default=False, action='store_true',
+                        help='Enable storage of RDB dumps in S3')
     parser.add_argument('--access-key', default="", metavar='ACCESS',
                         help='S3 access key with write permission to the specified bucket. Default is unauthenticated access')
     parser.add_argument('--secret-key', default="", metavar='SECRET',
@@ -388,16 +392,19 @@ if __name__ == '__main__':
         logger.error("Specified RDB path, %s, does not exist.", args.rdb_path)
         sys.exit(2)
 
-    boto_dict = make_boto_dict(args)
-    s3_conn = get_s3_connection(boto_dict, fail_on_boto=True)
-
-    if s3_conn:
-        user_id = s3_conn.get_canonical_user_id()
-        s3_conn.close()
-         # we rebuild the connection each time we want to write a meta-data dump
-        logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
+    boto_dict = None
+    if args.store_s3:
+        boto_dict = make_boto_dict(args)
+        s3_conn = get_s3_connection(boto_dict, fail_on_boto=True)
+        if s3_conn:
+            user_id = s3_conn.get_canonical_user_id()
+            s3_conn.close()
+             # we rebuild the connection each time we want to write a meta-data dump
+            logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
+        else:
+            logger.warning("S3 endpoint %s:%s not available. Files will only be written locally.", args.s3_host, args.s3_port)
     else:
-        logger.warning("S3 endpoint %s:%s not available. Files will only be written locally.", args.s3_host, args.s3_port)
+        logger.info("Running in disk only mode. RDB dumps will not be written to S3")
 
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(3)

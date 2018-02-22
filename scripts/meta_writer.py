@@ -152,6 +152,9 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
 
     rdbw = RDBWriter(client=telstate._r)
     (written, key_errors) = rdbw.save(dump_filename, keys=keys)
+    if not written:
+        logger.error("No valid telstate keys found for %s_%s", capture_block_id, stream_name)
+        return (None, key_errors)
     logger.info("Write complete. %s errors", key_errors)
     ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, key_errors))
 
@@ -162,15 +165,18 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     if not s3_conn:
         logger.error("Unable to store RDB dump in S3.")
         return (None, key_errors)
+    rate_bytes = 0
     written_bytes = 0
     try:
         s3_conn.create_bucket(capture_block_id)
         bucket = s3_conn.get_bucket(capture_block_id)
         k = bucket.new_key(key_name)
+        st = time.time()
         written_bytes = k.set_contents_from_filename(dump_filename)
+        rate_bytes = written_bytes / (time.time() - st)
     except boto.exception.S3ResponseError as e:
         if e.status == 409:
-            logger.error("Unable to store RDP dump as access key %s does not have permission to write to bucket %s",
+            logger.error("Unable to store RDB dump as access key %s does not have permission to write to bucket %s",
                          boto_dict["aws_access_key_id"], capture_block_id)
             return (None, key_errors)
         if e.status == 404:
@@ -179,7 +185,7 @@ def _write_lite_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
     if written_bytes != file_size:
         logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
         return (None, None)
-    return (written_bytes, key_errors)
+    return (rate_bytes, key_errors)
 
 
 class DeviceStatus(enum.Enum):
@@ -249,7 +255,7 @@ class MetaWriterServer(DeviceServer):
         """
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         dump_filename = os.path.join(dump_folder, "{}_{}.rdb.uploading".format(capture_block_id, stream_name))
-        (written_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
+        (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_lite_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict)
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
@@ -258,13 +264,13 @@ class MetaWriterServer(DeviceServer):
         if key_errors > 0:
             self._key_failures_sensor.set_value(self._key_failures_sensor.value + key_errors, Sensor.Status.ERROR)
 
-        if not written_b:
+        if not rate_b:
             try:
                 trawler_filename = os.path.join(dump_folder, "{}_{}.rdb".format(capture_block_id, stream_name))
                  # prepare to rename file so that the trawler process can attempt the S3 upload at a later date
                 os.rename(dump_filename, trawler_filename)
             except FileNotFoundError:
-                msg = "Failed to store RDP dump, and couldn't find file to rename. This error cannot be recovered from."
+                msg = "Failed to store RDB dump, and couldn't find file to rename. This error cannot be recovered from."
                 logger.error(msg)
                 raise FailReply(msg)
         else:
@@ -274,21 +280,24 @@ class MetaWriterServer(DeviceServer):
             except Exception as e:
                 logger.warning("Failed to remove transferred RDB file %s. (%s)", dump_filename, e)
                  # it won't interfere with the trawler so we just continue
-        return written_b
+        return rate_b
 
-    async def write_lite_meta(self, ctx, capture_block_id, stream_name):
+    async def write_lite_meta(self, ctx, capture_block_id, streams):
         """Implementation of request_write_lite_meta."""
-        task = asyncio.ensure_future(self._write_meta(ctx, capture_block_id, stream_name, lite=True), loop=self.loop)
-        self._device_status_sensor.set_value(DeviceStatus.QUEUED)
-        self._async_tasks.append(task)
-         # we check the queue depth before this point, so safe just to add it
-        try:
-            written_b = await task
-        finally:
-            self._clear_async_task(task)
-        return written_b
+        rate_per_stream = {}
+        for stream in streams:
+            task = asyncio.ensure_future(self._write_meta(ctx, capture_block_id, stream, lite=True), loop=self.loop)
+            self._device_status_sensor.set_value(DeviceStatus.QUEUED)
+            self._async_tasks.append(task)
+             # we risk queue depth expansion at this point, but we are really only checking to prevent outrageous failures
+            try:
+                rate_b = await task
+            finally:
+                self._clear_async_task(task)
+            rate_per_stream[stream] = rate_b
+        return rate_per_stream
 
-    async def request_write_lite_meta(self, ctx, capture_block_id: str, stream_name: str) -> str:
+    async def request_write_lite_meta(self, ctx, capture_block_id: str, stream_name: str = None) -> str:
         """Write a liteweight variant of the currently active telescope state to the already
         specified S3 bucket. If a capture_block_id is specified, this is used to produce a
         view on the telstate object specific to that block.
@@ -300,8 +309,9 @@ class MetaWriterServer(DeviceServer):
             The capture block id generated by master controller to identify a
             specific data capture. Typically this will be an integer representing the start time of
             the observation in epoch seconds (+/- to allow for uniqueness if required).
-        stream_name : string
+        stream_name : string, optional
             The specific stream name to use in extracting stream specific meta-data. (e.g. sdp_l0)
+            If no stream is specified, all streams with attached writers will be save individually.
 
         Returns
         -------
@@ -311,16 +321,26 @@ class MetaWriterServer(DeviceServer):
             The capture duration (and resultant MBps)
         """
         self._fail_if_busy()
-        ctx.inform("Starting write of lightweight metadata for CB: {} and Stream: {} to S3. This may take a minute or two..."
-                   .format(capture_block_id, stream_name))
+        if not stream_name:
+            streams = self._telstate.get('sdp_archived_streams')
+            if not streams:
+                raise FailReply("No stream specified, and cannot determine available streams from telstate.")
+        else:
+            streams = [stream_name]
+
+        ctx.inform("Starting write of lightweight metadata for CB: {} and Streams: {} to S3. This may take a minute or two..."
+                   .format(capture_block_id, streams))
         st = time.time()
-        written_b = await self.write_lite_meta(ctx, capture_block_id, stream_name)
-        if not written_b:
-            return "Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
-                    but will be moved independently once the link is restored".format(capture_block_id, stream_name)
-        duration_s = time.time() - st
-        self._last_transfer_rate.set_value(int(written_b * 8 / duration_s))
-        return "Lightweight meta-data for CB: {}_{} written to S3 in {:.2f}s @ {:.2f}MBps".format(capture_block_id, stream_name, duration_s, written_b / 1e6 / duration_s)
+        rate_per_stream = await self.write_lite_meta(ctx, capture_block_id, streams)
+        peak_rate = 0
+        for stream, rate_b in rate_per_stream.items():
+            if not rate_b:
+                ctx.inform("Lightweight meta-data for CB: {}_{} written to local disk only. File is *not* in S3, \
+                            but will be moved independently once the link is restored".format(capture_block_id, stream))
+            else:
+                ctx.inform("Lightweight meta-data for CB: {}_{} written to S3 @ {:.2f}MBps".format(capture_block_id, stream, rate_b / 1e6))
+                peak_rate = max(peak_rate, rate_b)
+        self._last_transfer_rate.set_value(peak_rate)
 
 
 def on_shutdown(loop, server):

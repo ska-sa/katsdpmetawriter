@@ -319,7 +319,7 @@ class MetaWriterServer(DeviceServer):
         optionally archive it to the preconfigured S3 endpoint. The precise subset
         is controlled through the selection of capture_block_id, stream_name and
         the lite boolean.
-        Method may take some time so is run asychronously.
+        Method may take some time so is run asynchronously.
 
         Parameters
         ----------

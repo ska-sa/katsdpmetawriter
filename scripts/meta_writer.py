@@ -222,6 +222,7 @@ class MetaWriterServer(DeviceServer):
         self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
         self._key_failures_sensor = Sensor(int, "key-failures", "Count of the number of failures to write a desired key to the RDB dump.")
         self._last_transfer_rate = Sensor(int, "last-transfer-rate", "Rate of last data transfer to S3 endpoint in Bps.")
+        self._last_dump_duration = Sensor(float, "last-dump-duration", "Time taken to write the last dump to disk.")
 
         super().__init__(host, port, loop=loop)
 
@@ -232,6 +233,7 @@ class MetaWriterServer(DeviceServer):
         self.sensors.add(self._last_write_stream_sensor)
         self.sensors.add(self._last_write_cbid_sensor)
         self.sensors.add(self._last_transfer_rate)
+        self.sensors.add(self._last_dump_duration)
         self._key_failures_sensor.set_value(0)
         self.sensors.add(self._key_failures_sensor)
 
@@ -266,12 +268,14 @@ class MetaWriterServer(DeviceServer):
         """
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         dump_filename = os.path.join(dump_folder, "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, "full." if not lite else ""))
+        st = time.time()
         (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict, lite)
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
         self._last_write_stream_sensor.set_value(stream_name)
         self._last_write_cbid_sensor.set_value(capture_block_id)
+        self._last_dump_duration.set_value(time.time() - st)
         if key_errors > 0:
             self._key_failures_sensor.set_value(self._key_failures_sensor.value + key_errors, Sensor.Status.ERROR)
 
@@ -335,7 +339,6 @@ class MetaWriterServer(DeviceServer):
 
         ctx.inform("Starting write of {} metadata for CB: {} and Streams: {} to S3. This may take a minute or two..."
                    .format("lightweight" if lite else "full", capture_block_id, streams))
-        st = time.time()
         rate_per_stream = await self.write_meta(ctx, capture_block_id, streams, lite)
         peak_rate = 0
         for stream, rate_b in rate_per_stream.items():

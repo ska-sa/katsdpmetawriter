@@ -28,7 +28,6 @@ command to produce a complete RDB file. This may contain meta-data from other ca
 import os
 import socket
 import sys
-import errno
 import logging
 import asyncio
 import signal
@@ -121,7 +120,7 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     In general we are more concerned with informing the user why the
     connection failed, rather than raising exceptions. Users should always
     check the return value and make appropriate decisions.
-    
+
     If set, fail_on_boto will not suppress boto exceptions. Used when verifying
     credentials.
 
@@ -144,7 +143,8 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
             logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
-        if fail_on_boto: raise
+        if fail_on_boto: 
+            raise
     return None
 
 

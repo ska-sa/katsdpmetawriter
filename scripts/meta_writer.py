@@ -80,7 +80,9 @@ LITE_KEYS = [
     "m???_observer",
     "m???_activity",
     "m???_target",
-    "cbf_target"
+    "cbf_target",
+    "sdp_capture_block_id",
+    "sdp_config"
 ]
 
 
@@ -143,7 +145,7 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
             logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
-        if fail_on_boto: 
+        if fail_on_boto:
             raise
     return None
 

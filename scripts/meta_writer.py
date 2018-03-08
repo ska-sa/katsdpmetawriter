@@ -158,7 +158,6 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     if lite:
         keys = get_lite_keys(telstate, capture_block_id, stream_name)
     dump_folder = os.path.dirname(dump_filename)
-    os.makedirs(dump_folder, exist_ok=True)
     logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
 
     temp_telstate = katsdptelstate.TelescopeState()
@@ -280,6 +279,7 @@ class MetaWriterServer(DeviceServer):
         """
         additional_name = "full." if not lite else ""
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
+        os.makedirs(dump_folder, exist_ok=True)
         dump_filename = os.path.join(dump_folder, "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, additional_name))
         st = time.time()
         (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict, lite)
@@ -309,6 +309,12 @@ class MetaWriterServer(DeviceServer):
             except Exception as e:
                 logger.warning("Failed to remove transferred RDB file %s. (%s)", dump_filename, e)
                  # it won't interfere with the trawler so we just continue
+        if not lite:
+            # We treat writing the full meta dump as the completion of meta data for that particular
+            # capture block id
+            touch_file = os.path.join(dump_folder, "complete")
+            with open(touch_file, 'a'):
+                os.utime(touch_file, None)
         return rate_b
 
     async def write_meta(self, ctx, capture_block_id, streams, lite=True):

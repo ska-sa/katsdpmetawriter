@@ -40,6 +40,7 @@ import boto
 import boto.s3.connection
 import katsdpservices
 import katsdpmetawriter
+import katsdptelstate
 from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
 
@@ -160,8 +161,17 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     os.makedirs(dump_folder, exist_ok=True)
     logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
 
+    temp_telstate = katsdptelstate.TelescopeState()
+    # Clear since the fake redis backend is a singleton
+    temp_telstate.clear()
+    temp_telstate.add('stream_name', stream_name)
+    temp_telstate.add('capture_block_id', capture_block_id)
+    temp_telstate.add('stream_type', katsdpservices.stream_type(stream_name))
+
     rdbw = RDBWriter(client=telstate._r)
-    (written, key_errors) = rdbw.save(dump_filename, keys=keys)
+    supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate._r, temp_telstate.keys())
+    (written, key_errors) = rdbw.save(dump_filename, keys=keys, supplemental_dumps=supplemental_dumps)
+
     if not written:
         logger.error("No valid telstate keys found for %s_%s", capture_block_id, stream_name)
         return (None, key_errors)

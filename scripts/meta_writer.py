@@ -33,6 +33,7 @@ import asyncio
 import signal
 import time
 import enum
+import pathlib
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -330,8 +331,7 @@ class MetaWriterServer(DeviceServer):
             # We treat writing the streams for a full meta dump as the completion of meta data for that particular
             # capture block id (assuming at least one stream was written)
             touch_file = os.path.join(dump_folder, "complete")
-            with open(touch_file, 'a'):
-                os.utime(touch_file, None)
+            pathlib.Path(touch_file).touch(exist_ok=True)
 
         return rate_per_stream
 

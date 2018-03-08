@@ -309,12 +309,6 @@ class MetaWriterServer(DeviceServer):
             except Exception as e:
                 logger.warning("Failed to remove transferred RDB file %s. (%s)", dump_filename, e)
                  # it won't interfere with the trawler so we just continue
-        if not lite:
-            # We treat writing the full meta dump as the completion of meta data for that particular
-            # capture block id
-            touch_file = os.path.join(dump_folder, "complete")
-            with open(touch_file, 'a'):
-                os.utime(touch_file, None)
         return rate_b
 
     async def write_meta(self, ctx, capture_block_id, streams, lite=True):
@@ -330,6 +324,15 @@ class MetaWriterServer(DeviceServer):
             finally:
                 self._clear_async_task(task)
             rate_per_stream[stream] = rate_b
+
+        dump_folder = os.path.join(self._rdb_path, capture_block_id)
+        if not lite and os.path.exists(dump_folder):
+            # We treat writing the streams for a full meta dump as the completion of meta data for that particular
+            # capture block id (assuming at least one stream was written)
+            touch_file = os.path.join(dump_folder, "complete")
+            with open(touch_file, 'a'):
+                os.utime(touch_file, None)
+
         return rate_per_stream
 
     async def request_write_meta(self, ctx, capture_block_id: str, lite: bool = True, stream_name: str = None) -> None:

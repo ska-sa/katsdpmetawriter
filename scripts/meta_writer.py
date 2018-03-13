@@ -69,6 +69,7 @@ LITE_KEYS = [
     "{sn}_bandwidth",
     "{sn}_center_freq",
     "{sn}_s3_endpoint_url",
+    "{sn}_stream_type",
     "{cb}_obs_params",
     "{cb}_obs_script_log",
     "{cb}_obs_label",
@@ -166,7 +167,6 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     temp_telstate.clear()
     temp_telstate.add('stream_name', stream_name)
     temp_telstate.add('capture_block_id', capture_block_id)
-    temp_telstate.add('stream_type', katsdpservices.stream_type(stream_name))
 
     rdbw = RDBWriter(client=telstate._r)
     supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate._r, temp_telstate.keys())

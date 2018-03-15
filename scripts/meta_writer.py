@@ -83,7 +83,8 @@ LITE_KEYS = [
     "m???_observer",
     "m???_activity",
     "m???_target",
-    "cbf_target"
+    "cbf_target",
+    "sdp_config"
 ]
 
 

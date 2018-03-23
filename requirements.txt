@@ -1,12 +1,12 @@
 aiokatcp==0.2
 boto==2.48.0
 decorator==4.2.1          # via aiokatcp
-fakenewsredis
+fakeredis
 hiredis
 ipaddress
 katversion
 netifaces
 numpy
-redis                     # via fakenewsredis
+redis                     # via fakeredis
 git+ssh://git@github.com/ska-sa/katsdptelstate#egg=katsdptelstate
 git+ssh://git@github.com/ska-sa/katsdpservices#egg=katsdpservices

@@ -228,12 +228,22 @@ class MetaWriterServer(DeviceServer):
 
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
-        self._device_status_sensor = Sensor(DeviceStatus, "status", "The current status of the meta writer process")
-        self._last_write_stream_sensor = Sensor(str, "last-write-stream", "The stream name of the last meta data dump.")
-        self._last_write_cbid_sensor = Sensor(str, "last-write-cbid", "The capture block ID of the last meta data dump.")
-        self._key_failures_sensor = Sensor(int, "key-failures", "Count of the number of failures to write a desired key to the RDB dump.")
-        self._last_transfer_rate = Sensor(int, "last-transfer-rate", "Rate of last data transfer to S3 endpoint in Bps.")
-        self._last_dump_duration = Sensor(float, "last-dump-duration", "Time taken to write the last dump to disk.", "s")
+        self._device_status_sensor = Sensor(
+            DeviceStatus, "status", "The current status of the meta writer process")
+        self._last_write_stream_sensor = Sensor(
+            str, "last-write-stream", "The stream name of the last meta data dump.")
+        self._last_write_cbid_sensor = Sensor(
+            str, "last-write-cbid", "The capture block ID of the last meta data dump.")
+        self._key_failures_sensor = Sensor(
+            int, "key-failures",
+            "Count of the number of failures to write a desired key to the RDB dump. "
+            "(prometheus: counter)")
+        self._last_transfer_rate = Sensor(
+            int, "last-transfer-rate",
+            "Rate of last data transfer to S3 endpoint in Bps. (prometheus: gauge)")
+        self._last_dump_duration = Sensor(
+            float, "last-dump-duration",
+            "Time taken to write the last dump to disk. (prometheus: gauge)", "s")
 
         super().__init__(host, port, loop=loop)
 

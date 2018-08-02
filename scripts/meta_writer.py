@@ -164,8 +164,8 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     temp_telstate = katsdptelstate.TelescopeState()
     # Clear since the fake redis backend is a singleton
     temp_telstate.clear()
-    temp_telstate.add('stream_name', stream_name)
-    temp_telstate.add('capture_block_id', capture_block_id)
+    temp_telstate.add('stream_name', stream_name, immutable=True)
+    temp_telstate.add('capture_block_id', capture_block_id, immutable=True)
 
     rdbw = RDBWriter(client=telstate._r)
     supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate._r, temp_telstate.keys())

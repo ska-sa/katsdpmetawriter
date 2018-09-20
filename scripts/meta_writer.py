@@ -74,7 +74,6 @@ LITE_KEYS = [
     "{cb}_obs_script_log",
     "{cb}_obs_label",
     "{cb}_obs_activity",
-    "{cb}_{sn}_chunk_name",
     "{cb}_{sn}_chunk_info",
     "{cb}_{sn}_first_timestamp",
     "sub_pool_resources",

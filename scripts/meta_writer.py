@@ -70,6 +70,7 @@ LITE_KEYS = [
     "{sn}_center_freq",
     "{sn}_s3_endpoint_url",
     "{sn}_stream_type",
+    "{sn}_need_weights_power_scale",
     "{cb}_obs_params",
     "{cb}_obs_script_log",
     "{cb}_obs_label",

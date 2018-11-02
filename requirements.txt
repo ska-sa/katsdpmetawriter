@@ -5,6 +5,7 @@ fakeredis
 hiredis
 ipaddress
 katversion
+msgpack                   # via katsdptelstate
 netifaces
 numpy
 pygelf

@@ -21,8 +21,8 @@ storage configuration information and observation targets. Using the supplied ca
 ID, an attempt is also made to only record meta information specific to that capture
 block ID.
 
-The second is a complete dump of the entire TS, in the Redis case using the BGSAVE
-command to produce a complete RDB file. This may contain meta-data from other capture sessions.
+The second is a complete dump of the entire TS. This may contain meta-data from
+other capture sessions.
 """
 
 import os
@@ -42,6 +42,8 @@ import boto.s3.connection
 import katsdpservices
 import katsdpmetawriter
 import katsdptelstate
+import katsdptelstate.redis
+import katsdptelstate.tabloid_redis
 from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
 
@@ -161,14 +163,17 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     dump_folder = os.path.dirname(dump_filename)
     logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
 
-    temp_telstate = katsdptelstate.TelescopeState()
-    # Clear since the fake redis backend is a singleton
-    temp_telstate.clear()
+    try:
+        temp_telstate_client = katsdptelstate.tabloid_redis.TabloidRedis(singleton=False)
+    except TypeError:
+        # singleton option became default and was removed in fakeredis 1.0
+        temp_telstate_client = katsdptelstate.tabloid_redis.TabloidRedis()
+    temp_telstate = katsdptelstate.TelescopeState(katsdptelstate.redis.RedisBackend(temp_telstate_client))
     temp_telstate.add('stream_name', stream_name, immutable=True)
     temp_telstate.add('capture_block_id', capture_block_id, immutable=True)
 
-    rdbw = RDBWriter(client=telstate._r)
-    supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate._r, temp_telstate.keys())
+    rdbw = RDBWriter(client=telstate.backend.client)
+    supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate_client, temp_telstate.keys())
     (written, key_errors) = rdbw.save(dump_filename, keys=keys, supplemental_dumps=supplemental_dumps)
 
     if not written:

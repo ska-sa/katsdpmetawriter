@@ -42,8 +42,6 @@ import boto.s3.connection
 import katsdpservices
 import katsdpmetawriter
 import katsdptelstate
-import katsdptelstate.redis
-import katsdptelstate.tabloid_redis
 from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
 
@@ -160,23 +158,17 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     keys = None
     if lite:
         keys = get_lite_keys(telstate, capture_block_id, stream_name)
-    dump_folder = os.path.dirname(dump_filename)
     logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
 
-    try:
-        temp_telstate_client = katsdptelstate.tabloid_redis.TabloidRedis(singleton=False)
-    except TypeError:
-        # singleton option became default and was removed in fakeredis 1.0
-        temp_telstate_client = katsdptelstate.tabloid_redis.TabloidRedis()
-    temp_telstate = katsdptelstate.TelescopeState(katsdptelstate.redis.RedisBackend(temp_telstate_client))
-    temp_telstate.add('stream_name', stream_name, immutable=True)
-    temp_telstate.add('capture_block_id', capture_block_id, immutable=True)
-
-    rdbw = RDBWriter(client=telstate.backend.client)
-    supplemental_dumps = rdbw.encode_supplemental_keys(temp_telstate_client, temp_telstate.keys())
-    (written, key_errors) = rdbw.save(dump_filename, keys=keys, supplemental_dumps=supplemental_dumps)
-
-    if not written:
+    supplemental_telstate = katsdptelstate.TelescopeState()
+    supplemental_telstate['stream_name'] = stream_name
+    supplemental_telstate['capture_block_id'] = capture_block_id
+    with RDBWriter(dump_filename) as rdbw:
+        rdbw.save(telstate, keys)
+        if rdbw.keys_written > 0:
+            rdbw.save(supplemental_telstate)
+    key_errors = rdbw.keys_failed
+    if not rdbw.keys_written:
         logger.error("No valid telstate keys found for %s_%s", capture_block_id, stream_name)
         return (None, key_errors)
     logger.info("Write complete. %s errors", key_errors)

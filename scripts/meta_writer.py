@@ -362,14 +362,16 @@ class MetaWriterServer(DeviceServer):
             only to the chosen capture_block_id and stream_name.
         stream_name : string, optional
             The specific stream name to use in extracting stream specific meta-data.
-            (e.g. sdp_l0) If no stream is specified, all streams with attached writers
-            will be saved individually.
+            (e.g. sdp_l0) If no stream is specified, all sdp.vis streams with
+            attached writers will be saved individually.
         """
         self._fail_if_busy()
         if not stream_name:
             streams = self._telstate.get('sdp_archived_streams')
             if not streams:
                 raise FailReply("No stream specified, and cannot determine available streams from telstate.")
+            streams = [stream for stream in streams
+                       if self._telstate.view(stream).get('stream_type') == 'sdp.vis']
         else:
             streams = [stream_name]
 

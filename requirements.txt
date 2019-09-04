@@ -10,5 +10,5 @@ netifaces
 numpy
 pygelf
 redis                     # via fakeredis
-git+ssh://git@github.com/ska-sa/katsdptelstate#egg=katsdptelstate
-git+ssh://git@github.com/ska-sa/katsdpservices#egg=katsdpservices
+katsdpservices @ git+https://git@github.com/ska-sa/katsdpservices
+katsdptelstate @ git+https://git@github.com/ska-sa/katsdptelstate

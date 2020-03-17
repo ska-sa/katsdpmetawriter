@@ -1,14 +1,13 @@
-aiokatcp==0.2
+aiokatcp
+async-timeout             # via aiokatcp
 boto==2.48.0
-decorator==4.2.1          # via aiokatcp
-fakeredis
+decorator                 # via aiokatcp
 hiredis
-ipaddress
 katversion
 msgpack                   # via katsdptelstate
 netifaces
 numpy
 pygelf
-redis                     # via fakeredis
+redis                     # via katsdptelstate
 katsdpservices @ git+https://github.com/ska-sa/katsdpservices
 katsdptelstate @ git+https://github.com/ska-sa/katsdptelstate

@@ -59,7 +59,9 @@ MAX_ASYNC_TASKS = 10
 #    {cb}: The capture block ID which uniquely identifies this data capture
 #    {sn}: The name of a specific stream in the capture (e.g. sdp_l0)
 #    m???: A special that represents a glob-style pattern match used to
-#          do wildcard antenna name matching for certain keys.
+#          do wildcard MeerKAT antenna name matching for certain keys.
+#    s????: A special that represents a glob-style pattern match used to
+#          do wildcard SKA prototype antenna name matching for certain keys.
 #
 LITE_KEYS = [
     "{sn}_int_time",
@@ -83,6 +85,9 @@ LITE_KEYS = [
     "m???_observer",
     "m???_activity",
     "m???_target",
+    "s????_observer",
+    "s????_activity",
+    "s????_target",
     "cbf_target",
     "sdp_config"
 ]

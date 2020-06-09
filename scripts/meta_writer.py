@@ -58,7 +58,7 @@ MAX_ASYNC_TASKS = 10
 #
 #    {cb}: The capture block ID which uniquely identifies this data capture
 #    {sn}: The name of a specific stream in the capture (e.g. sdp_l0)
-#    m???: A special that represents a glob-style pattern match used to
+#    *: A special that represents a glob-style pattern match used to
 #          do wildcard antenna name matching for certain keys.
 #
 LITE_KEYS = [
@@ -80,9 +80,9 @@ LITE_KEYS = [
     "sub_pool_resources",
     "sub_band",
     "sub_product",
-    "m???_observer",
-    "m???_activity",
-    "m???_target",
+    "*_observer",
+    "*_activity",
+    "*_target",
     "cbf_target",
     "sdp_config"
 ]
@@ -110,7 +110,7 @@ def get_lite_keys(telstate, capture_block_id, stream_name):
     """
     keys = []
     for key in LITE_KEYS:
-        if key.find('?') >= 0:
+        if key.find('*_') >= 0:
             keys.extend(telstate.keys(filter=key))
         else:
             keys.append(key.format(cb=capture_block_id, sn=stream_name))

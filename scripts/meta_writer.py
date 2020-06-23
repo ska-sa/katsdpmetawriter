@@ -89,7 +89,8 @@ LITE_KEYS = [
     "s????_activity",
     "s????_target",
     "cbf_target",
-    "sdp_config"
+    "sdp_config",
+    "sdp_model_base_url"
 ]
 
 
@@ -157,17 +158,25 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     return None
 
 
-def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto_dict, lite=True):
+def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto_dict, lite=True,
+               model_base_url=None):
     """Synchronous code used to create an on-disk dump, and if a valid boto_dict is supplied
     upload the dump to S3."""
-    keys = None
     if lite:
         keys = get_lite_keys(telstate, capture_block_id, stream_name)
+    else:
+        keys = telstate.keys()
     logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
 
     supplemental_telstate = katsdptelstate.TelescopeState()
     supplemental_telstate['stream_name'] = stream_name
     supplemental_telstate['capture_block_id'] = capture_block_id
+    if model_base_url is not None:
+        supplemental_telstate['sdp_model_base_url'] = model_base_url
+        try:
+            keys.remove('sdp_model_base_url')
+        except ValueError:
+            pass
     with RDBWriter(dump_filename) as rdbw:
         rdbw.save(telstate, keys)
         if rdbw.keys_written > 0:
@@ -221,12 +230,13 @@ class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpmetawriter-" + katsdpmetawriter.__version__
 
-    def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate):
+    def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate, model_base_url):
         self._boto_dict = boto_dict
         self._async_tasks = deque()
         self._executor = executor
         self._rdb_path = rdb_path
         self._telstate = telstate
+        self._model_base_url = model_base_url
 
         self._build_state_sensor = Sensor(str, "build-state", "SDP Controller build state.")
 
@@ -294,7 +304,7 @@ class MetaWriterServer(DeviceServer):
         os.makedirs(dump_folder, exist_ok=True)
         dump_filename = os.path.join(dump_folder, "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, additional_name))
         st = time.time()
-        (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict, lite)
+        (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict, lite, self._model_base_url)
          # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
          # regardless of the stream selected.
          # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
@@ -427,6 +437,8 @@ if __name__ == '__main__':
                         help='S3 gateway host address [default=%(default)s]')
     parser.add_argument('--s3-port', default=7480, metavar='PORT',
                         help='S3 gateway port [default=%(default)s]')
+    parser.add_argument('--model-base-url', metavar='URL',
+                        help='Rewrite sdp_model_base_url telstate key to this value')
     parser.add_argument('-p', '--port', type=int, default=2049, metavar='N',
                         help='KATCP host port [default=%(default)s]')
     parser.add_argument('-a', '--host', default="", metavar='HOST',
@@ -455,7 +467,8 @@ if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(3)
 
-    server = MetaWriterServer(args.host, args.port, loop, executor, boto_dict, args.rdb_path, args.telstate)
+    server = MetaWriterServer(args.host, args.port, loop, executor, boto_dict,
+                              args.rdb_path, args.telstate, args.model_base_url)
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))

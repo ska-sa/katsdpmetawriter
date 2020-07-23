@@ -12,9 +12,9 @@ import katsdpmetawriter
 
 
 def on_shutdown(loop, server):
+    # in case the exit code below borks, we allow shutdown via traditional means
     loop.remove_signal_handler(signal.SIGINT)
     loop.remove_signal_handler(signal.SIGTERM)
-     # in case the exit code below borks, we allow shutdown via traditional means
     server.halt()
 
 
@@ -31,22 +31,30 @@ if __name__ == '__main__':
     katsdpservices.setup_restart()
 
     parser = katsdpservices.ArgumentParser()
-    parser.add_argument('--rdb-path', default="/var/kat/data", metavar='RDBPATH',
-                        help='Root in which to write RDB dumps.')
-    parser.add_argument('--store-s3', dest='store_s3', default=False, action='store_true',
-                        help='Enable storage of RDB dumps in S3')
-    parser.add_argument('--access-key', default="", metavar='ACCESS',
-                        help='S3 access key with write permission to the specified bucket. Default is unauthenticated access')
-    parser.add_argument('--secret-key', default="", metavar='SECRET',
-                        help='S3 secret key for the specified access key. Default is unauthenticated access')
-    parser.add_argument('--s3-host', default='localhost', metavar='HOST',
-                        help='S3 gateway host address [default=%(default)s]')
-    parser.add_argument('--s3-port', default=7480, metavar='PORT',
-                        help='S3 gateway port [default=%(default)s]')
-    parser.add_argument('-p', '--port', type=int, default=2049, metavar='N',
-                        help='KATCP host port [default=%(default)s]')
-    parser.add_argument('-a', '--host', default="", metavar='HOST',
-                        help='KATCP host address [default=all hosts]')
+    parser.add_argument(
+        '--rdb-path', default="/var/kat/data", metavar='RDBPATH',
+        help='Root in which to write RDB dumps')
+    parser.add_argument(
+        '--store-s3', dest='store_s3', default=False, action='store_true',
+        help='Enable storage of RDB dumps in S3')
+    parser.add_argument(
+        '--access-key', default="", metavar='ACCESS',
+        help='S3 access key with write permission to the specified bucket [unauthenticated]')
+    parser.add_argument(
+        '--secret-key', default="", metavar='SECRET',
+        help='S3 secret key for the specified access key [unauthenticated]')
+    parser.add_argument(
+        '--s3-host', default='localhost', metavar='HOST',
+        help='S3 gateway host address [%(default)s]')
+    parser.add_argument(
+        '--s3-port', default=7480, metavar='PORT',
+        help='S3 gateway port [%(default)s]')
+    parser.add_argument(
+        '-p', '--port', type=int, default=2049, metavar='N',
+        help='KATCP host port [%(default)s]')
+    parser.add_argument(
+        '-a', '--host', default="", metavar='HOST',
+        help='KATCP host address [all hosts]')
 
     args = parser.parse_args()
 
@@ -61,17 +69,21 @@ if __name__ == '__main__':
         if s3_conn:
             user_id = s3_conn.get_canonical_user_id()
             s3_conn.close()
-             # we rebuild the connection each time we want to write a meta-data dump
+            # we rebuild the connection each time we want to write a meta-data dump
             logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
         else:
-            logger.warning("S3 endpoint %s:%s not available. Files will only be written locally.", args.s3_host, args.s3_port)
+            logger.warning(
+                "S3 endpoint %s:%s not available. Files will only be written locally.",
+                args.s3_host, args.s3_port)
     else:
         logger.info("Running in disk only mode. RDB dumps will not be written to S3")
 
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(3)
 
-    server = katsdpmetawriter.MetaWriterServer(args.host, args.port, loop, executor, boto_dict, args.rdb_path, args.telstate)
+    server = katsdpmetawriter.MetaWriterServer(
+        args.host, args.port, loop, executor, boto_dict,
+        args.rdb_path, args.telstate)
     logger.info("Started meta-data writer server.")
 
     loop.run_until_complete(run(loop, server))

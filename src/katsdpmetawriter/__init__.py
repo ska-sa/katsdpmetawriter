@@ -39,6 +39,7 @@ The second is a complete dump of the entire TS. This may contain meta-data from
 other capture sessions.
 """
 
+import logging
 import os
 import socket
 import asyncio
@@ -65,6 +66,9 @@ except ImportError:
 else:
     __version__ = _katversion.get_version(__path__[0])    # type: ignore
 # END VERSION CHECK
+
+
+logger = logging.getLogger(__name__)
 
 # Fairly arbitrary limit on number of concurrent meta data writes
 # that we allow. Tradeoff between not stopping observations and
@@ -115,15 +119,15 @@ LITE_KEYS = [
 
 
 def make_boto_dict(s3_args):
-    """Create a dict of keyword parameters suitable for passing into a boto.connect_s3 call using the supplied args."""
+    """Create a dict suitable for passing into a boto.connect_s3 call using the supplied args."""
     return {
-            "aws_access_key_id": s3_args.access_key,
-            "aws_secret_access_key": s3_args.secret_key,
-            "host": s3_args.s3_host,
-            "port": s3_args.s3_port,
-            "is_secure": False,
-            "calling_format": boto.s3.connection.OrdinaryCallingFormat()
-           }
+        "aws_access_key_id": s3_args.access_key,
+        "aws_secret_access_key": s3_args.secret_key,
+        "host": s3_args.s3_host,
+        "port": s3_args.s3_port,
+        "is_secure": False,
+        "calling_format": boto.s3.connection.OrdinaryCallingFormat()
+    }
 
 
 def get_lite_keys(telstate, capture_block_id, stream_name):
@@ -161,18 +165,24 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     """
     s3_conn = boto.connect_s3(**boto_dict)
     try:
+        # reliable way to test connection and access keys
         s3_conn.get_canonical_user_id()
-         # reliable way to test connection and access keys
         return s3_conn
     except socket.error as e:
-        logger.error("Failed to connect to S3 host %s:%s. Please check network and host address. (%s)", boto_dict['host'], boto_dict['port'], e)
+        logger.error(
+            "Failed to connect to S3 host %s:%s. Please check network and host address. (%s)",
+            boto_dict['host'], boto_dict['port'], e)
     except boto.exception.S3ResponseError as e:
         if e.error_code == 'InvalidAccessKeyId':
-            logger.error("Supplied access key %s is not a valid S3 user.", boto_dict['aws_access_key_id'])
+            logger.error(
+                "Supplied access key %s is not a valid S3 user.",
+                boto_dict['aws_access_key_id'])
         if e.error_code == 'SignatureDoesNotMatch':
             logger.error("Supplied secret key is not valid for specified user.")
         if e.status == 403 or e.status == 409:
-            logger.error("Supplied access key (%s) has no permissions on this server.", boto_dict['aws_access_key_id'])
+            logger.error(
+                "Supplied access key (%s) has no permissions on this server.",
+                boto_dict['aws_access_key_id'])
         if fail_on_boto:
             raise
     return None
@@ -184,7 +194,9 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
     keys = None
     if lite:
         keys = get_lite_keys(telstate, capture_block_id, stream_name)
-    logger.info("Writing %s keys to local RDB dump %s", str(len(keys)) if lite else "all", dump_filename)
+    logger.info(
+        "Writing %s keys to local RDB dump %s",
+        str(len(keys)) if lite else "all", dump_filename)
 
     supplemental_telstate = katsdptelstate.TelescopeState()
     supplemental_telstate['stream_name'] = stream_name
@@ -198,7 +210,9 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         logger.error("No valid telstate keys found for %s_%s", capture_block_id, stream_name)
         return (None, key_errors)
     logger.info("Write complete. %s errors", key_errors)
-    ctx.inform("RDB extract and write for {}_{} complete. {} errors".format(capture_block_id, stream_name, key_errors))
+    ctx.inform(
+        "RDB extract and write for {}_{} complete. {} errors"
+        .format(capture_block_id, stream_name, key_errors))
 
     if not boto_dict:
         return (None, key_errors)
@@ -221,14 +235,20 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         rate_bytes = written_bytes / (time.time() - st)
     except boto.exception.S3ResponseError as e:
         if e.status == 409:
-            logger.error("Unable to store RDB dump as access key %s does not have permission to write to bucket %s",
-                         boto_dict["aws_access_key_id"], capture_block_id)
+            logger.error(
+                "Unable to store RDB dump as access key %s "
+                "does not have permission to write to bucket %s",
+                boto_dict["aws_access_key_id"], capture_block_id)
             return (None, key_errors)
         if e.status == 404:
-            logger.error("Unable to store RDB dump as the bucket %s or key %s has been lost.", capture_block_id, key_name)
+            logger.error(
+                "Unable to store RDB dump as the bucket %s or key %s has been lost.",
+                capture_block_id, key_name)
             return (None, key_errors)
     if written_bytes != file_size:
-        logger.error("Incorrect number of bytes written (%d/%d) when writing RDB dump %s", written_bytes, file_size, dump_filename)
+        logger.error(
+            "Incorrect number of bytes written (%d/%d) when writing RDB dump %s",
+            written_bytes, file_size, dump_filename)
         return (None, key_errors)
     return (rate_bytes, key_errors)
 
@@ -288,7 +308,9 @@ class MetaWriterServer(DeviceServer):
             if not task.done():
                 busy_tasks += 1
         if busy_tasks >= MAX_ASYNC_TASKS:
-            raise FailReply('Meta-data writer has too many operations in progress (max {}). Please wait for one to complete first.'.format(MAX_ASYNC_TASKS))
+            raise FailReply(
+                ('Meta-data writer has too many operations in progress (max {}). '
+                 'Please wait for one to complete first.').format(MAX_ASYNC_TASKS))
 
     def _clear_async_task(self, future):
         """Clear the specified async task.
@@ -313,45 +335,63 @@ class MetaWriterServer(DeviceServer):
         additional_name = "full." if not lite else ""
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         os.makedirs(dump_folder, exist_ok=True)
-        dump_filename = os.path.join(dump_folder, "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, additional_name))
+        dump_filename = os.path.join(
+            dump_folder,
+            "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, additional_name))
         st = time.time()
-        (rate_b, key_errors) = await self.loop.run_in_executor(self._executor, _write_rdb, ctx, self._telstate, dump_filename, capture_block_id, stream_name, self._boto_dict, lite)
-         # Generate local RDB dump and write into S3 - note that capture_block_id is used as the bucket name for storing meta-data
-         # regardless of the stream selected.
-         # The full capture_block_stream_name is used as the bucket for payload data for the particular stream.
+        # Generate local RDB dump and write into S3 - note that
+        # capture_block_id is used as the bucket name for storing meta-data
+        # regardless of the stream selected.
+        # The full capture_block_stream_name is used as the bucket for payload
+        # data for the particular stream.
+        (rate_b, key_errors) = await self.loop.run_in_executor(
+            self._executor, _write_rdb, ctx, self._telstate, dump_filename,
+            capture_block_id, stream_name, self._boto_dict, lite)
         et = time.time()
         self._last_write_stream_sensor.set_value(stream_name, timestamp=et)
         self._last_write_cbid_sensor.set_value(capture_block_id, timestamp=et)
         self._last_dump_duration.set_value(et - st, timestamp=et)
         if key_errors > 0:
-            self._key_failures_sensor.set_value(self._key_failures_sensor.value + key_errors, Sensor.Status.ERROR)
+            self._key_failures_sensor.set_value(
+                self._key_failures_sensor.value + key_errors,
+                Sensor.Status.ERROR)
 
         if not rate_b:
             try:
-                trawler_filename = os.path.join(dump_folder, "{}_{}.{}rdb".format(capture_block_id, stream_name, additional_name))
-                 # prepare to rename file so that the trawler process can attempt the S3 upload at a later date
+                trawler_filename = os.path.join(
+                    dump_folder,
+                    "{}_{}.{}rdb".format(capture_block_id, stream_name, additional_name))
+                # Prepare to rename file so that the trawler process can
+                # attempt the S3 upload at a later date.
                 os.rename(dump_filename, trawler_filename)
             except FileNotFoundError:
-                msg = "Failed to store RDB dump, and couldn't find file to rename. This error cannot be recovered from."
+                msg = (
+                    "Failed to store RDB dump, and couldn't find file to rename. "
+                    "This error cannot be recovered from."
+                )
                 logger.error(msg)
                 raise FailReply(msg)
         else:
-            logger.info("RDB file written to bucket %s with key %s", capture_block_id, os.path.basename(dump_filename))
+            logger.info(
+                "RDB file written to bucket %s with key %s",
+                capture_block_id, os.path.basename(dump_filename))
             try:
                 os.remove(dump_filename)
             except Exception as e:
+                # it won't interfere with the trawler so we just continue
                 logger.warning("Failed to remove transferred RDB file %s. (%s)", dump_filename, e)
-                 # it won't interfere with the trawler so we just continue
         return rate_b
 
     async def write_meta(self, ctx, capture_block_id, streams, lite=True):
         """Implementation of request_write_meta."""
         rate_per_stream = {}
         for stream in streams:
-            task = asyncio.ensure_future(self._write_meta(ctx, capture_block_id, stream, lite), loop=self.loop)
+            task = asyncio.ensure_future(
+                self._write_meta(ctx, capture_block_id, stream, lite), loop=self.loop)
             self._device_status_sensor.set_value(DeviceStatus.QUEUED)
+            # we risk queue depth expansion at this point, but we are really
+            # only checking to prevent outrageous failures.
             self._async_tasks.append(task)
-             # we risk queue depth expansion at this point, but we are really only checking to prevent outrageous failures
             try:
                 rate_b = await task
             finally:
@@ -360,14 +400,16 @@ class MetaWriterServer(DeviceServer):
 
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         if not lite and os.path.exists(dump_folder):
-            # We treat writing the streams for a full meta dump as the completion of meta data for that particular
-            # capture block id (assuming at least one stream was written)
+            # We treat writing the streams for a full meta dump as the
+            # completion of meta data for that particular capture block id
+            # (assuming at least one stream was written).
             touch_file = os.path.join(dump_folder, "complete")
             pathlib.Path(touch_file).touch(exist_ok=True)
 
         return rate_per_stream
 
-    async def request_write_meta(self, ctx, capture_block_id: str, lite: bool = True, stream_name: str = None) -> None:
+    async def request_write_meta(
+            self, ctx, capture_block_id: str, lite: bool = True, stream_name: str = None) -> None:
         """Write a dump of a subset of currently active telescope state to disk and
         optionally archive it to the preconfigured S3 endpoint. The precise subset
         is controlled through the selection of capture_block_id, stream_name and
@@ -395,22 +437,29 @@ class MetaWriterServer(DeviceServer):
         if not stream_name:
             streams = self._telstate.get('sdp_archived_streams')
             if not streams:
-                raise FailReply("No stream specified, and cannot determine available streams from telstate.")
+                raise FailReply(
+                    "No stream specified, and cannot determine available streams from telstate.")
             streams = [stream for stream in streams
                        if self._telstate.view(stream).get('stream_type') == 'sdp.vis']
         else:
             streams = [stream_name]
 
-        ctx.inform("Starting write of {} metadata for CB: {} and Streams: {} to S3. This may take a minute or two..."
-                   .format("lightweight" if lite else "full", capture_block_id, streams))
+        ctx.inform(
+            ("Starting write of {} metadata for CB: {} and Streams: {} to S3. "
+             "This may take a minute or two...")
+            .format("lightweight" if lite else "full", capture_block_id, streams))
         rate_per_stream = await self.write_meta(ctx, capture_block_id, streams, lite)
         peak_rate = 0
         dump_type_name = "Lightweight" if lite else "Full dump"
         for stream, rate_b in rate_per_stream.items():
             if not rate_b:
-                ctx.inform("{} meta-data for CB: {}_{} written to local disk only".format(dump_type_name, capture_block_id, stream))
+                ctx.inform(
+                    "{} meta-data for CB: {}_{} written to local disk only"
+                    .format(dump_type_name, capture_block_id, stream))
             else:
-                ctx.inform("{} meta-data for CB: {}_{} written to S3 @ {:.2f}MBps".format(dump_type_name, capture_block_id, stream, rate_b / 1e6))
+                ctx.inform(
+                    "{} meta-data for CB: {}_{} written to S3 @ {:.2f}MBps"
+                    .format(dump_type_name, capture_block_id, stream, rate_b / 1e6))
                 peak_rate = max(peak_rate, rate_b)
         if peak_rate > 0:
             self._last_transfer_rate.set_value(peak_rate)

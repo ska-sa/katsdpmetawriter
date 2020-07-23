@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-
 ################################################################################
-# Copyright (c) 2020, National Research Foundation (SARAO)
+# Copyright (c) 2018-2020, National Research Foundation (SARAO)
 #
 # Licensed under the BSD 3-Clause License (the "License"); you may not use
 # this file except in compliance with the License. You may obtain a copy
@@ -16,6 +14,13 @@
 # limitations under the License.
 ################################################################################
 
-from setuptools import setup
-
-setup(use_katversion=True)
+# BEGIN VERSION CHECK
+# Get package version when locally imported from repo or via -e develop install
+try:
+    import katversion as _katversion
+except ImportError:
+    import time as _time
+    __version__ = "0.0+unknown.{}".format(_time.strftime('%Y%m%d%H%M'))
+else:
+    __version__ = _katversion.get_version(__path__[0])    # type: ignore
+# END VERSION CHECK

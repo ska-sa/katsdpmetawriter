@@ -1,0 +1,9 @@
+coverage
+attrs                           # via pytest
+more-itertools                  # via pytest
+packaging                       # via pytest
+pluggy                          # via pytest
+py                              # via pytest
+pytest
+pytest-cov
+wcwidth                         # via pytest

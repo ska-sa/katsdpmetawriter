@@ -1,5 +1,8 @@
-coverage
 attrs                           # via pytest
+certifi                         # via requests
+chardet                         # via requests
+coverage
+idna                            # via requests
 importlib-metadata              # via pytest, pluggy
 more-itertools                  # via pytest
 packaging                       # via pytest
@@ -8,5 +11,7 @@ py                              # via pytest
 pytest
 pytest-cov
 pytest-mock==3.2.0
+requests
+urllib3                         # via requests
 wcwidth                         # via pytest
 zipp                            # via importlib-metadata

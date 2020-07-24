@@ -230,9 +230,9 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         s3_conn.create_bucket(capture_block_id)
         bucket = s3_conn.get_bucket(capture_block_id)
         k = bucket.new_key(key_name)
-        st = time.time()
+        st = time.monotonic()
         written_bytes = k.set_contents_from_filename(dump_filename)
-        rate_bytes = written_bytes / (time.time() - st)
+        rate_bytes = written_bytes / (time.monotonic() - st)
     except boto.exception.S3ResponseError as e:
         if e.status in {403, 409}:
             logger.error(

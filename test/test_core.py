@@ -312,11 +312,11 @@ def test_write_rdb_s3_full(telstate, s3_args, tmp_path_factory, mocker):
     boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
     ctx = mocker.MagicMock()
+    mocker.patch('time.monotonic', side_effect=[100.0, 105.0])
     rate_bytes, key_errors = katsdpmetawriter._write_rdb(
         ctx, telstate, str(path), CBID, STREAM_NAME, boto_dict=boto_dict, lite=False
     )
-    assert isinstance(rate_bytes, float)
-    assert rate_bytes > 0.0
+    assert rate_bytes == path.stat().st_size / 5.0
     assert key_errors == 0, 'Should never be key errors with a full dump'
     ctx.inform.assert_called()
 

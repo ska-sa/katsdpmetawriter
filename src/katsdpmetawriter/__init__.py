@@ -234,16 +234,19 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         written_bytes = k.set_contents_from_filename(dump_filename)
         rate_bytes = written_bytes / (time.time() - st)
     except boto.exception.S3ResponseError as e:
-        if e.status == 409:
+        if e.status in {403, 409}:
             logger.error(
                 "Unable to store RDB dump as access key %s "
                 "does not have permission to write to bucket %s",
                 boto_dict["aws_access_key_id"], capture_block_id)
             return (None, key_errors)
-        if e.status == 404:
+        elif e.status == 404:
             logger.error(
                 "Unable to store RDB dump as the bucket %s or key %s has been lost.",
                 capture_block_id, key_name)
+            return (None, key_errors)
+        else:
+            logger.error("Error writing to %s/%s in S3", capture_block_id, key_name, exc_info=True)
             return (None, key_errors)
     if written_bytes != file_size:
         logger.error(

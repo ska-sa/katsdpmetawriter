@@ -7,5 +7,6 @@ pluggy                          # via pytest
 py                              # via pytest
 pytest
 pytest-cov
+pytest-mock==3.2.0
 wcwidth                         # via pytest
 zipp                            # via importlib-metadata

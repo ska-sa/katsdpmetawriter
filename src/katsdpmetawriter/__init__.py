@@ -285,7 +285,7 @@ class MetaWriterServer(DeviceServer):
             "Count of the number of failures to write a desired key to the RDB dump. "
             "(prometheus: counter)")
         self._last_transfer_rate = Sensor(
-            int, "last-transfer-rate",
+            float, "last-transfer-rate",
             "Rate of last data transfer to S3 endpoint in Bps. (prometheus: gauge)")
         self._last_dump_duration = Sensor(
             float, "last-dump-duration",

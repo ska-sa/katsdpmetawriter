@@ -15,15 +15,18 @@
 ################################################################################
 
 import argparse
+import concurrent.futures
 import contextlib
 import logging
 import os
+import pathlib
 import socket
 import subprocess
 import time
 import urllib.parse
 
 import pytest
+import aiokatcp
 import boto
 import requests
 import katsdptelstate
@@ -37,6 +40,7 @@ class S3User:
         self.secret_key = secret_key
 
 
+pytestmark = [pytest.mark.asyncio]
 CBID = '1122334455'
 STREAM_NAME = 'sdp_l0'
 
@@ -223,6 +227,7 @@ def telstate():
     """Telescope state with a smattering of keys for test purposes"""
     telstate = katsdptelstate.TelescopeState()
     telstate[f'{STREAM_NAME}_int_time'] = 7.5
+    telstate[f'{STREAM_NAME}_stream_type'] = 'sdp.vis'
     telstate['sub_pool_resources'] = 'cbf_1,sdp_1,m000'
     telstate['m000_observer'] = 'm000, -30:42:39.8, 21:26:38.0, 1035.0, 13.5, -8.258 -207.289 1.2075 5874.184 5875.444, -0:00:39.7 0 -0:04:04.4 -0:04:53.0 0:00:57.8 -0:00:13.9 0:13:45.2 0:00:59.8, 1.14'     # noqa: E501
     telstate.add(f'{CBID}_obs_activity', 'slew', ts=1234567890.0)
@@ -230,6 +235,7 @@ def telstate():
     telstate.add('s0000_activity', 'slew', ts=1234567890.0)
     telstate[f'{STREAM_NAME}_another_attrib'] = 'foo'
     telstate.add('another_sensor', 'value', ts=1234567890.0)
+    telstate['sdp_archived_streams'] = ['sdp_l0']
     return telstate
 
 
@@ -291,7 +297,8 @@ def test_write_rdb_local_lite(telstate, tmp_path_factory, mocker):
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
     ctx = mocker.MagicMock()
     rate_bytes, key_errors = katsdpmetawriter._write_rdb(
-        ctx, telstate, str(path), CBID, STREAM_NAME, boto_dict=None, lite=True
+        ctx, telstate, str(path), CBID, STREAM_NAME,
+        boto_dict=None, key_name=None, lite=True
     )
     assert rate_bytes is None, 'rate_bytes does not apply with local-only dump'
     assert key_errors > 0      # We didn't fully populate dummy telstate
@@ -300,7 +307,7 @@ def test_write_rdb_local_lite(telstate, tmp_path_factory, mocker):
     telstate2 = katsdptelstate.TelescopeState()
     telstate2.load_from_file(path)
     for key in telstate.keys():
-        if 'another' in key:    # Not in the lite list
+        if 'sdp_archived_streams' in key or 'another' in key:    # Not in the lite list
             assert key not in telstate2
         else:
             assert key_info(telstate, key) == key_info(telstate2, key)
@@ -310,11 +317,12 @@ def test_write_rdb_local_lite(telstate, tmp_path_factory, mocker):
 
 def test_write_rdb_s3_full(telstate, s3_args, tmp_path_factory, mocker):
     boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
-    path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
+    path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
-    mocker.patch('time.monotonic', side_effect=[100.0, 105.0])
+    mocker.patch('katsdpmetawriter.timer', side_effect=[100.0, 105.0])
     rate_bytes, key_errors = katsdpmetawriter._write_rdb(
-        ctx, telstate, str(path), CBID, STREAM_NAME, boto_dict=boto_dict, lite=False
+        ctx, telstate, str(path), CBID, STREAM_NAME,
+        boto_dict=boto_dict, key_name='dump.rdb', lite=False
     )
     assert rate_bytes == path.stat().st_size / 5.0
     assert key_errors == 0, 'Should never be key errors with a full dump'
@@ -345,11 +353,12 @@ def test_write_rdb_lost_connection(telstate, tmp_path_factory, mocker, caplog):
     boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
     mocker.patch('katsdpmetawriter.get_s3_connection', return_value=None)
 
-    path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
+    path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
     with caplog.at_level(logging.ERROR):
         rate_bytes, key_errors = katsdpmetawriter._write_rdb(
-            ctx, telstate, str(path), CBID, STREAM_NAME, boto_dict=boto_dict, lite=False
+            ctx, telstate, str(path), CBID, STREAM_NAME,
+            boto_dict=boto_dict, key_name='dump.rdb', lite=False
         )
     assert rate_bytes is None
     assert 'Unable to store RDB dump' in caplog.text
@@ -359,11 +368,88 @@ def test_write_rdb_s3_permission_error(telstate, s3_args, tmp_path_factory, mock
     s3_args.access_key = READONLY_USER.access_key
     s3_args.secret_key = READONLY_USER.secret_key
     boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
-    path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
+    path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
     with caplog.at_level(logging.ERROR):
         rate_bytes, key_errors = katsdpmetawriter._write_rdb(
-            ctx, telstate, str(path), CBID, STREAM_NAME, boto_dict=boto_dict, lite=False
+            ctx, telstate, str(path), CBID, STREAM_NAME,
+            boto_dict=boto_dict, key_name='dump.rdb', lite=False
         )
     assert rate_bytes is None
     assert 'does not have permission' in caplog.text
+
+
+@pytest.fixture(params=[True, False])
+async def device_server(request, s3_args, telstate, tmp_path_factory, event_loop):
+    """Create and start a :class:`~.MetaWriterServer`.
+
+    It is parametrized by whether to connect it to an S3 server.
+    """
+    rdb_path = tmp_path_factory.mktemp('dump')
+    executor = concurrent.futures.ThreadPoolExecutor(1)
+    boto_dict = katsdpmetawriter.make_boto_dict(s3_args) if request.param else None
+    server = katsdpmetawriter.MetaWriterServer(
+        '127.0.0.1', 0, event_loop, executor, boto_dict, str(rdb_path), telstate)
+    await server.start()
+    yield server
+    await server.stop()
+
+
+@pytest.fixture
+async def device_client(device_server):
+    address = device_server.server.sockets[0].getsockname()
+    client = await aiokatcp.Client.connect(address[0], address[1])
+    yield client
+    client.close()
+    await client.wait_closed()
+
+
+async def get_sensor(client, sensor_name):
+    """Get last sensor value (in encoded form), or None if no value."""
+    reply, informs = await client.request('sensor-value', sensor_name)
+    assert reply == [b'1']
+    status = informs[0].arguments[3]
+    value = informs[0].arguments[4]
+    if status in {b'nominal', b'warning', b'error'}:
+        return value
+    else:
+        return None
+
+
+async def test_meta_write_lite_all(device_client):
+    reply, informs = await device_client.request('write-meta', CBID)
+    cs = f'{CBID}_{STREAM_NAME}'
+    assert len(informs) == 3
+    assert 'Starting write of lightweight metadata' in informs[0].arguments[0].decode()
+    assert f'RDB extract and write for {cs} complete' in informs[1].arguments[0].decode()
+    assert f'Lightweight meta-data for CB: {cs} written' in informs[2].arguments[0].decode()
+
+
+async def test_meta_write_full_single(device_client, device_server, mocker):
+    # There are two nested timers, so we have to return the start time twice
+    # then the end time twice.
+    mocker.patch('katsdpmetawriter.timer', side_effect=[100.0, 100.0, 105.0, 105.0])
+    reply, informs = await device_client.request('write-meta', CBID, False, STREAM_NAME)
+    cs = f'{CBID}_{STREAM_NAME}'
+    assert len(informs) == 3
+    assert 'Starting write of full metadata' in informs[0].arguments[0].decode()
+    assert f'RDB extract and write for {cs} complete' in informs[1].arguments[0].decode()
+    assert f'Full dump meta-data for CB: {cs} written' in informs[2].arguments[0].decode()
+
+    s3 = device_server._boto_dict is not None
+    if s3:
+        s3_conn = boto.connect_s3(**device_server._boto_dict)
+        bucket = s3_conn.get_bucket(CBID)
+        obj_key = bucket.new_key(f'{cs}.full.rdb')
+        size = len(obj_key.get_contents_as_string())
+    else:
+        path = pathlib.Path(device_server._rdb_path) / CBID / f'{cs}.full.rdb'
+        size = path.stat().st_size
+
+    assert await get_sensor(device_client, 'status') == b'idle'
+    assert await get_sensor(device_client, 'last-write-stream') == STREAM_NAME.encode()
+    assert await get_sensor(device_client, 'last-write-cbid') == CBID.encode()
+    if device_server._boto_dict:
+        assert float(await get_sensor(device_client, 'last-transfer-rate')) == size / 5.0
+    else:
+        assert await get_sensor(device_client, 'last-transfer-rate') is None

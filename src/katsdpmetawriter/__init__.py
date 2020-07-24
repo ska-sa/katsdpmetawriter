@@ -118,6 +118,14 @@ LITE_KEYS = [
 ]
 
 
+def timer():
+    """Get timestamp for measuring elapsed time.
+
+    This is a wrapper that's made so that it can be mocked easily.
+    """
+    return time.monotonic()
+
+
 def make_boto_dict(s3_args):
     """Create a dict suitable for passing into a boto.connect_s3 call using the supplied args."""
     return {
@@ -188,9 +196,13 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     return None
 
 
-def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto_dict, lite=True):
-    """Synchronous code used to create an on-disk dump, and if a valid boto_dict is supplied
-    upload the dump to S3."""
+def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
+               boto_dict, key_name, lite=True):
+    """Synchronous code used to create an on-disk dump.
+
+    If a `boto_dict` is supplied, upload the dump to S3, with the name
+    `key_name`.
+    """
     keys = None
     if lite:
         keys = get_lite_keys(telstate, capture_block_id, stream_name)
@@ -218,7 +230,6 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         return (None, key_errors)
 
     s3_conn = get_s3_connection(boto_dict)
-    key_name = os.path.basename(dump_filename)
     file_size = os.path.getsize(dump_filename)
 
     if not s3_conn:
@@ -230,9 +241,9 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name, boto
         s3_conn.create_bucket(capture_block_id)
         bucket = s3_conn.get_bucket(capture_block_id)
         k = bucket.new_key(key_name)
-        st = time.monotonic()
+        st = timer()
         written_bytes = k.set_contents_from_filename(dump_filename)
-        rate_bytes = written_bytes / (time.monotonic() - st)
+        rate_bytes = written_bytes / (timer() - st)
     except boto.exception.S3ResponseError as e:
         if e.status in {403, 409}:
             logger.error(
@@ -338,10 +349,9 @@ class MetaWriterServer(DeviceServer):
         additional_name = "full." if not lite else ""
         dump_folder = os.path.join(self._rdb_path, capture_block_id)
         os.makedirs(dump_folder, exist_ok=True)
-        dump_filename = os.path.join(
-            dump_folder,
-            "{}_{}.{}rdb.uploading".format(capture_block_id, stream_name, additional_name))
-        st = time.time()
+        basename = "{}_{}.{}rdb".format(capture_block_id, stream_name, additional_name)
+        dump_filename = os.path.join(dump_folder, basename + '.uploading')
+        st = timer()
         # Generate local RDB dump and write into S3 - note that
         # capture_block_id is used as the bucket name for storing meta-data
         # regardless of the stream selected.
@@ -349,11 +359,12 @@ class MetaWriterServer(DeviceServer):
         # data for the particular stream.
         (rate_b, key_errors) = await self.loop.run_in_executor(
             self._executor, _write_rdb, ctx, self._telstate, dump_filename,
-            capture_block_id, stream_name, self._boto_dict, lite)
-        et = time.time()
-        self._last_write_stream_sensor.set_value(stream_name, timestamp=et)
-        self._last_write_cbid_sensor.set_value(capture_block_id, timestamp=et)
-        self._last_dump_duration.set_value(et - st, timestamp=et)
+            capture_block_id, stream_name, self._boto_dict, basename, lite)
+        et = timer()
+        sensor_timestamp = time.time()
+        self._last_write_stream_sensor.set_value(stream_name, timestamp=sensor_timestamp)
+        self._last_write_cbid_sensor.set_value(capture_block_id, timestamp=sensor_timestamp)
+        self._last_dump_duration.set_value(et - st, timestamp=sensor_timestamp)
         if key_errors > 0:
             self._key_failures_sensor.set_value(
                 self._key_failures_sensor.value + key_errors,
@@ -361,9 +372,7 @@ class MetaWriterServer(DeviceServer):
 
         if not rate_b:
             try:
-                trawler_filename = os.path.join(
-                    dump_folder,
-                    "{}_{}.{}rdb".format(capture_block_id, stream_name, additional_name))
+                trawler_filename = os.path.join(dump_folder, basename)
                 # Prepare to rename file so that the trawler process can
                 # attempt the S3 upload at a later date.
                 os.rename(dump_filename, trawler_filename)

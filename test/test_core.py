@@ -129,6 +129,10 @@ class S3Server:
             else:
                 raise RuntimeError('Timed out waiting for minio to be ready')
 
+    def wipe(self):
+        """Remove all buckets and objects"""
+        self.mc('rb', '--force', '--dangerous', 'minio')
+
     def close(self):
         if self._process:
             self._process.terminate()
@@ -141,7 +145,7 @@ class S3Server:
     def __exit__(self, exc_type, exc_value, exc_tb):
         self.close()
 
-    def mc_admin(self, *args):
+    def mc(self, *args):
         """Run a (minio) mc admin subcommand against the running server.
 
         The running server has the alias ``minio``.
@@ -152,7 +156,7 @@ class S3Server:
         # from interfering with the test.
         subprocess.run(
             [
-                'mc', 'admin', '--quiet', '--no-color', f'--config-dir={self.path}',
+                'mc', '--quiet', '--no-color', f'--config-dir={self.path}',
                 *args
             ],
             stdout=subprocess.DEVNULL,
@@ -164,17 +168,8 @@ class S3Server:
         )
 
 
-@pytest.fixture
-def s3_server(tmp_path_factory):
-    """Start a process running an S3 server.
-
-    This relies on `minio` and `mc` being installed on the :envvar:`PATH`. If
-    they are not found, the test will be skipped.
-
-    The value of the fixture is an instance of :class:`S3Server`. It also has
-    additional users, with credentials given by :data:`NOBODY_USER` and
-    :data:`READONLY_USER`.
-    """
+@pytest.fixture(scope='session')
+def _s3_server(tmp_path_factory):
     path = tmp_path_factory.mktemp('minio')
     try:
         server = S3Server(path, ADMIN_USER)
@@ -186,23 +181,23 @@ def s3_server(tmp_path_factory):
     (policy_dir / "nobody.json").write_text(NOBODY_POLICY)
     with server:
         try:
-            server.mc_admin(
-                'user', 'add', 'minio', NOBODY_USER.access_key, NOBODY_USER.secret_key
+            server.mc(
+                'admin', 'user', 'add', 'minio', NOBODY_USER.access_key, NOBODY_USER.secret_key
             )
-            server.mc_admin(
-                'user', 'add', 'minio', READONLY_USER.access_key, READONLY_USER.secret_key
+            server.mc(
+                'admin', 'user', 'add', 'minio', READONLY_USER.access_key, READONLY_USER.secret_key
             )
-            server.mc_admin(
-                'policy', 'add', 'minio', 'nobody', str(policy_dir / "nobody.json")
+            server.mc(
+                'admin', 'policy', 'add', 'minio', 'nobody', str(policy_dir / "nobody.json")
             )
-            server.mc_admin(
-                'policy', 'add', 'minio', 'readonly2', str(policy_dir / "readonly.json")
+            server.mc(
+                'admin', 'policy', 'add', 'minio', 'readonly2', str(policy_dir / "readonly.json")
             )
-            server.mc_admin(
-                'policy', 'set', 'minio', 'nobody', f'user={NOBODY_USER.access_key}'
+            server.mc(
+                'admin', 'policy', 'set', 'minio', 'nobody', f'user={NOBODY_USER.access_key}'
             )
-            server.mc_admin(
-                'policy', 'set', 'minio', 'readonly2', f'user={READONLY_USER.access_key}'
+            server.mc(
+                'admin', 'policy', 'set', 'minio', 'readonly2', f'user={READONLY_USER.access_key}'
             )
         except OSError as exc:
             pytest.skip(f'Could not run mc: {exc}')
@@ -210,6 +205,30 @@ def s3_server(tmp_path_factory):
             pytest.fail(f'Failed to set up extra users: {exc.stderr}')
 
         yield server
+
+
+@pytest.fixture
+def s3_server(_s3_server):
+    """Start a process running an S3 server.
+
+    This relies on `minio` and `mc` being installed on the :envvar:`PATH`. If
+    they are not found, the test will be skipped.
+
+    The value of the fixture is an instance of :class:`S3Server`. It also has
+    additional users, with credentials given by :data:`NOBODY_USER` and
+    :data:`READONLY_USER`.
+
+    .. warning::
+
+       The server is only started once per session, and is wiped of data before
+       each test. Any state not associated with buckets or objects will leak
+       between tests.
+    """
+    try:
+        _s3_server.wipe()
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f'Failed to wipe out objects: {exc.stderr}')
+    return _s3_server
 
 
 @pytest.fixture

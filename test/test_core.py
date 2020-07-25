@@ -15,6 +15,7 @@
 ################################################################################
 
 import argparse
+import asyncio
 import concurrent.futures
 import contextlib
 import logging
@@ -22,6 +23,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
 
@@ -151,7 +153,7 @@ class S3Server:
         The running server has the alias ``minio``.
         """
         env = os.environ.copy()
-        env[f'MC_HOST_minio'] = self.auth_url
+        env['MC_HOST_minio'] = self.auth_url
         # --config-dir is set just to prevent any config set by the user
         # from interfering with the test.
         subprocess.run(
@@ -302,6 +304,15 @@ def test_get_s3_connection_bad_host(s3_args, caplog):
     assert 'Please check network and host address' in caplog.text
 
 
+def test_get_s3_connection_fail_on_boto(s3_args, caplog):
+    s3_args.secret_key = 'wrong'
+    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(boto.exception.S3ResponseError):
+            katsdpmetawriter.get_s3_connection(boto_dict, fail_on_boto=True)
+    assert 'secret key is not valid' in caplog.text
+
+
 def key_info(telstate, key):
     """Get all information about a telescope state key."""
     key_type = telstate.key_type(key)
@@ -360,6 +371,21 @@ def test_write_rdb_s3_full(telstate, s3_args, tmp_path_factory, mocker):
     assert telstate2.get('capture_block_id') == CBID
     assert telstate2.get('stream_name') == STREAM_NAME
     assert len(telstate2.keys()) == len(telstate.keys()) + 2
+
+
+def test_write_rdb_zero_keys(telstate, tmp_path_factory, mocker, caplog):
+    ctx = mocker.MagicMock()
+    path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
+    telstate.clear()
+    with caplog.at_level(logging.ERROR):
+        rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+            ctx, telstate, str(path), CBID, STREAM_NAME,
+            boto_dict=None, key_name=None, lite=False
+        )
+    assert rate_bytes is None
+    assert key_errors == 0
+    assert not path.exists()
+    assert 'No valid telstate keys' in caplog.text
 
 
 def test_write_rdb_lost_connection(telstate, tmp_path_factory, mocker, caplog):
@@ -472,3 +498,26 @@ async def test_meta_write_full_single(device_client, device_server, mocker):
         assert float(await get_sensor(device_client, 'last-transfer-rate')) == size / 5.0
     else:
         assert await get_sensor(device_client, 'last-transfer-rate') is None
+
+
+@pytest.mark.parametrize('device_server', [False], indirect=True)
+async def test_meta_write_too_many(device_client, mocker, event_loop):
+    def slow_write_rdb(*args, **kwargs):
+        result = orig_write_rdb(*args, **kwargs)
+        unblock_write.wait()
+        return result
+
+    unblock_write = threading.Event()
+    orig_write_rdb = katsdpmetawriter._write_rdb
+    mocker.patch('katsdpmetawriter._write_rdb', slow_write_rdb)
+    tasks = []
+    # Start one more than the maximum number of concurrent writes
+    for i in range(katsdpmetawriter.MAX_ASYNC_TASKS + 1):
+        cbid = f'CBID{i}'
+        tasks.append(
+            event_loop.create_task(device_client.request('write-meta', cbid, True, STREAM_NAME))
+        )
+    unblock_write.set()
+    await asyncio.gather(*tasks[:-1])       # Initial MAX_ASYNC_TASKS all succeed
+    with pytest.raises(aiokatcp.FailReply, match='too many operations in progress'):
+        await asyncio.gather(tasks[-1])

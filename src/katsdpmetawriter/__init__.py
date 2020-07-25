@@ -50,7 +50,6 @@ from collections import deque
 
 import boto
 import boto.s3.connection
-import katsdpmetawriter
 import katsdptelstate
 from katsdptelstate.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
@@ -274,7 +273,7 @@ class DeviceStatus(enum.Enum):
 
 class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
-    BUILD_STATE = "katsdpmetawriter-" + katsdpmetawriter.__version__
+    BUILD_STATE = "katsdpmetawriter-" + __version__
 
     def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate):
         self._boto_dict = boto_dict

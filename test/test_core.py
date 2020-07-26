@@ -440,6 +440,10 @@ async def device_server(request, s3_args, telstate, tmp_path_factory, event_loop
     await server.stop()
 
 
+without_s3 = pytest.mark.parametrize('device_server', [False], indirect=True)
+only_s3 = pytest.mark.parametrize('device_server', [True], indirect=True)
+
+
 @pytest.fixture
 async def device_client(device_server):
     address = device_server.server.sockets[0].getsockname()
@@ -500,7 +504,6 @@ async def test_meta_write_full_single(device_client, device_server, mocker):
         assert await get_sensor(device_client, 'last-transfer-rate') is None
 
 
-@pytest.mark.parametrize('device_server', [False], indirect=True)
 async def test_meta_write_too_many(device_client, mocker, event_loop):
     def slow_write_rdb(*args, **kwargs):
         result = orig_write_rdb(*args, **kwargs)
@@ -513,7 +516,7 @@ async def test_meta_write_too_many(device_client, mocker, event_loop):
     tasks = []
     # Start one more than the maximum number of concurrent writes
     for i in range(katsdpmetawriter.MAX_ASYNC_TASKS + 1):
-        cbid = f'CBID{i}'
+        cbid = f'{CBID}{i}'
         tasks.append(
             event_loop.create_task(device_client.request('write-meta', cbid, True, STREAM_NAME))
         )
@@ -521,3 +524,43 @@ async def test_meta_write_too_many(device_client, mocker, event_loop):
     await asyncio.gather(*tasks[:-1])       # Initial MAX_ASYNC_TASKS all succeed
     with pytest.raises(aiokatcp.FailReply, match='too many operations in progress'):
         await asyncio.gather(tasks[-1])
+
+
+async def test_meta_writer_no_sdp_archived_streams(device_client, telstate):
+    telstate.delete('sdp_archived_streams')
+    with pytest.raises(aiokatcp.FailReply, match='cannot determine available streams'):
+        await device_client.request('write-meta', CBID)
+
+
+@without_s3
+async def test_meta_writer_rename_failed(device_client, mocker):
+    def mock_rename(src, dest):
+        # Make os.rename fail by removing the source file.
+        os.remove(src)
+        return orig_rename(src, dest)
+
+    orig_rename = os.rename
+    mocker.patch('os.rename', mock_rename)
+    with pytest.raises(aiokatcp.FailReply, match='Failed to store RDB dump'):
+        await device_client.request('write-meta', CBID)
+
+
+@only_s3
+async def test_meta_writer_remove_failed(device_client, device_server, mocker, caplog):
+    def mock_remove(filename):
+        # Make os.remove fail by removing it twice
+        orig_remove(filename)
+        return orig_remove(filename)
+
+    orig_remove = os.remove
+    mocker.patch('os.remove', mock_remove)
+    with caplog.at_level(logging.WARNING):
+        await device_client.request('write-meta', CBID)
+    assert 'Failed to remove transferred RDB file' in caplog.text
+
+    # Make sure the S3 transfer still worked
+    s3_conn = boto.connect_s3(**device_server._boto_dict)
+    bucket = s3_conn.get_bucket(CBID)
+    obj_key = bucket.new_key(f'{CBID}_{STREAM_NAME}.rdb')
+    size = len(obj_key.get_contents_as_string())
+    assert size > 0

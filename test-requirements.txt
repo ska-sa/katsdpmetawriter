@@ -1,18 +1,26 @@
 attrs                           # via pytest
 certifi                         # via requests
 chardet                         # via requests
+cityhash                        # via katdal
 coverage
+dask                            # via katdal
+future                          # via katdal
+h5py                            # via katdal
 idna                            # via requests
 importlib-metadata              # via pytest, pluggy
+katpoint                        # via katdal
 more-itertools                  # via pytest
 packaging                       # via pytest
 pluggy                          # via pytest
 py                              # via pytest
+pyjwt                           # via katdal
 pytest
 pytest-asyncio==0.14.0
 pytest-cov
 pytest-mock==3.2.0
-requests
+requests                        # via katdal
 urllib3                         # via requests
 wcwidth                         # via pytest
 zipp                            # via importlib-metadata
+
+katdal @ git+https://github.com/ska-sa/katdal@s3-utils

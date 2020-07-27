@@ -17,29 +17,19 @@
 import argparse
 import asyncio
 import concurrent.futures
-import contextlib
 import logging
 import os
 import pathlib
-import socket
 import subprocess
 import threading
-import time
-import urllib.parse
 
 import pytest
 import aiokatcp
 import boto
-import requests
 import katsdptelstate
+from katdal.test.s3_utils import S3User, S3Server, MissingProgram, ProgramFailed
 
 import katsdpmetawriter
-
-
-class S3User:
-    def __init__(self, access_key, secret_key):
-        self.access_key = access_key
-        self.secret_key = secret_key
 
 
 pytestmark = [pytest.mark.asyncio]
@@ -84,99 +74,13 @@ READONLY_POLICY = '''
 '''
 
 
-class S3Server:
-    def __init__(self, path, user):
-        self.host = '127.0.0.1'      # Unlike 'localhost', ensures IPv4
-        self.path = path
-        self.user = user
-        self._process = None
-
-        env = os.environ.copy()
-        env['MINIO_BROWSER'] = 'off'
-        env['MINIO_ACCESS_KEY'] = self.user.access_key
-        env['MINIO_SECRET_KEY'] = self.user.secret_key
-        with contextlib.ExitStack() as exit_stack:
-            sock = exit_stack.enter_context(socket.socket())
-            # Allows minio to bind to the same socket. Setting both
-            # SO_REUSEPORT and SO_REUSEADDR might not be necessary, but
-            # could make this more portable.
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('127.0.0.1', 0))
-            self.port = sock.getsockname()[1]
-            self._process = subprocess.Popen(
-                [
-                    'minio', 'server', '--quiet',
-                    '--address', f'{self.host}:{self.port}',
-                    '-C', str(self.path / 'config'),
-                    str(self.path / 'data'),
-                ],
-                stdout=subprocess.DEVNULL,
-                env=env
-            )
-
-            self.url = f'http://{self.host}:{self.port}'
-            self.auth_url = f'http://{user.access_key}:{user.secret_key}@{self.host}:{self.port}'
-            health_url = urllib.parse.urljoin(self.url, '/minio/health/live')
-            for i in range(100):
-                try:
-                    with requests.get(health_url) as resp:
-                        if resp.ok:
-                            break
-                except requests.ConnectionError:
-                    pass
-                if self._process.poll() is not None:
-                    raise RuntimeError('Minio died before it became healthy')
-                time.sleep(0.1)
-            else:
-                raise RuntimeError('Timed out waiting for minio to be ready')
-
-    def wipe(self):
-        """Remove all buckets and objects"""
-        self.mc('rb', '--force', '--dangerous', 'minio')
-
-    def close(self):
-        if self._process:
-            self._process.terminate()
-            self._process.wait()
-            self._process = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        self.close()
-
-    def mc(self, *args):
-        """Run a (minio) mc admin subcommand against the running server.
-
-        The running server has the alias ``minio``.
-        """
-        env = os.environ.copy()
-        env['MC_HOST_minio'] = self.auth_url
-        # --config-dir is set just to prevent any config set by the user
-        # from interfering with the test.
-        subprocess.run(
-            [
-                'mc', '--quiet', '--no-color', f'--config-dir={self.path}',
-                *args
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            env=env,
-            encoding='utf-8',
-            errors='replace',
-            check=True
-        )
-
-
 @pytest.fixture(scope='session')
 def _s3_server(tmp_path_factory):
     path = tmp_path_factory.mktemp('minio')
     try:
         server = S3Server(path, ADMIN_USER)
-    except OSError as exc:
-        pytest.skip(f'Could not start minio: {exc}')
+    except MissingProgram as exc:
+        pytest.skip(str(exc))
 
     policy_dir = tmp_path_factory.mktemp('policies')
     (policy_dir / "readonly.json").write_text(READONLY_POLICY)
@@ -201,10 +105,10 @@ def _s3_server(tmp_path_factory):
             server.mc(
                 'admin', 'policy', 'set', 'minio', 'readonly2', f'user={READONLY_USER.access_key}'
             )
-        except OSError as exc:
-            pytest.skip(f'Could not run mc: {exc}')
-        except subprocess.CalledProcessError as exc:
-            pytest.fail(f'Failed to set up extra users: {exc.stderr}')
+        except MissingProgram as exc:
+            pytest.skip(str(exc))
+        except ProgramFailed as exc:
+            pytest.fail(f'Failed to set up extra users: {exc}')
 
         yield server
 

@@ -23,6 +23,7 @@ pytest-asyncio==0.14.0
 pytest-cov
 pytest-mock==3.2.0
 requests                        # via katdal
+toolz                           # via dask
 urllib3                         # via requests
 wcwidth                         # via pytest
 zipp                            # via importlib-metadata

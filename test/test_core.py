@@ -20,6 +20,7 @@ import concurrent.futures
 import logging
 import os
 import pathlib
+import socket
 import subprocess
 import threading
 
@@ -76,9 +77,15 @@ READONLY_POLICY = '''
 
 @pytest.fixture(scope='session')
 def _s3_server(tmp_path_factory):
+    # Allocate an unused port. Unfortunately the unused_tcp_port_factory
+    # fixture from pytest-asyncio is function-scoped, so can't be used.
+    host = '127.0.0.1'
+    with socket.socket() as sock:
+        sock.bind((host, 0))
+        port = sock.getsockname()[1]
     path = tmp_path_factory.mktemp('minio')
     try:
-        server = S3Server(path, ADMIN_USER)
+        server = S3Server(host, port, path, ADMIN_USER)
     except MissingProgram as exc:
         pytest.skip(str(exc))
 

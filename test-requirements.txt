@@ -9,7 +9,9 @@ h5py                            # via katdal
 idna                            # via requests
 importlib-metadata              # via pytest, pluggy
 katpoint==0.9                   # via katdal
+llvmlite                        # via numba
 more-itertools                  # via pytest
+numba                           # via katdal
 packaging                       # via pytest
 pluggy                          # via pytest
 py                              # via pytest

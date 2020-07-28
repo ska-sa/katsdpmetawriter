@@ -4,7 +4,8 @@ chardet                         # via requests
 cityhash                        # via katdal
 coverage
 dask                            # via katdal
-future                          # via katdal
+ephem                           # via pyephem
+future                          # via katdal, katpoint
 h5py                            # via katdal
 idna                            # via requests
 importlib-metadata              # via pytest, pluggy
@@ -15,6 +16,7 @@ numba                           # via katdal
 packaging                       # via pytest
 pluggy                          # via pytest
 py                              # via pytest
+pyephem                         # via katpoint
 pyjwt                           # via katdal
 pytest
 pytest-asyncio==0.14.0

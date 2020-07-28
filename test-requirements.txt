@@ -8,7 +8,7 @@ future                          # via katdal
 h5py                            # via katdal
 idna                            # via requests
 importlib-metadata              # via pytest, pluggy
-katpoint                        # via katdal
+katpoint==0.9                   # via katdal
 more-itertools                  # via pytest
 packaging                       # via pytest
 pluggy                          # via pytest

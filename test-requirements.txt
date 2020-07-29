@@ -28,4 +28,4 @@ urllib3                         # via requests
 wcwidth                         # via pytest
 zipp                            # via importlib-metadata
 
-katdal @ git+https://github.com/ska-sa/katdal@s3-utils
+katdal @ git+https://github.com/ska-sa/katdal

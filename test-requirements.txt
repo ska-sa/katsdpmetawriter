@@ -22,6 +22,8 @@ pytest
 pytest-asyncio==0.14.0
 pytest-cov
 pytest-mock==3.2.0
+python-lzf                      # via katsdptelstate[rdb]
+rdbtools                        # via katsdptelstate[rdb]
 requests                        # via katdal
 toolz                           # via dask
 urllib3                         # via requests

@@ -17,7 +17,7 @@
 """Serialise a view of the Telescope State for the current observation to long term storage.
 
 The Telescope State (TS) is a meta-data repository that includes information about the
-current state of the wide telescope, configuration data and intermediate SDP products
+current state of the wider telescope, configuration data and intermediate SDP products
 such as calibration solutions. It also contains references to the data objects that
 comprise the visibility data captured for an observation.
 

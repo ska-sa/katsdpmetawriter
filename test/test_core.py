@@ -16,18 +16,17 @@
 
 import argparse
 import asyncio
-import concurrent.futures
 import logging
 import os
 import pathlib
 import socket
 import subprocess
-import threading
 
 import pytest
+from async_generator import asynccontextmanager
 import aiokatcp
-import boto
-import katsdptelstate
+import botocore.exceptions
+import katsdptelstate.aio.memory
 from katdal.test.s3_utils import S3User, S3Server, MissingProgram, ProgramFailed
 
 import katsdpmetawriter
@@ -155,143 +154,152 @@ def s3_args(s3_server):
 
 
 @pytest.fixture
-def telstate():
+async def telstate():
     """Telescope state with a smattering of keys for test purposes"""
-    telstate = katsdptelstate.TelescopeState()
-    telstate[f'{STREAM_NAME}_int_time'] = 7.5
-    telstate[f'{STREAM_NAME}_stream_type'] = 'sdp.vis'
-    telstate['sub_pool_resources'] = 'cbf_1,sdp_1,m000'
-    telstate['m000_observer'] = 'm000, -30:42:39.8, 21:26:38.0, 1035.0, 13.5, -8.258 -207.289 1.2075 5874.184 5875.444, -0:00:39.7 0 -0:04:04.4 -0:04:53.0 0:00:57.8 -0:00:13.9 0:13:45.2 0:00:59.8, 1.14'     # noqa: E501
-    telstate.add(f'{CBID}_obs_activity', 'slew', ts=1234567890.0)
-    telstate[f'{CBID}_{STREAM_NAME}_first_timestamp'] = 1122334455.0
-    telstate.add('s0000_activity', 'slew', ts=1234567890.0)
-    telstate[f'{STREAM_NAME}_another_attrib'] = 'foo'
-    telstate.add('another_sensor', 'value', ts=1234567890.0)
-    telstate['sdp_archived_streams'] = ['sdp_l0']
+    telstate = katsdptelstate.aio.TelescopeState()
+    await telstate.set(f'{STREAM_NAME}_int_time', 7.5)
+    await telstate.set(f'{STREAM_NAME}_stream_type', 'sdp.vis')
+    await telstate.set('sub_pool_resources', 'cbf_1,sdp_1,m000')
+    await telstate.set('m000_observer', 'm000, -30:42:39.8, 21:26:38.0, 1035.0, 13.5, -8.258 -207.289 1.2075 5874.184 5875.444, -0:00:39.7 0 -0:04:04.4 -0:04:53.0 0:00:57.8 -0:00:13.9 0:13:45.2 0:00:59.8, 1.14')     # noqa: E501
+    await telstate.add(f'{CBID}_obs_activity', 'slew', ts=1234567890.0)
+    await telstate.set(f'{CBID}_{STREAM_NAME}_first_timestamp', 1122334455.0)
+    await telstate.add('s0000_activity', 'slew', ts=1234567890.0)
+    await telstate.set(f'{STREAM_NAME}_another_attrib', 'foo')
+    await telstate.add('another_sensor', 'value', ts=1234567890.0)
+    await telstate.set('sdp_archived_streams', ['sdp_l0'])
     return telstate
 
 
-def test_get_s3_connection(s3_args):
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
-    conn = katsdpmetawriter.get_s3_connection(boto_dict)
-    assert conn is not None
-    conn.close()
+async def test_get_s3_connection(s3_args):
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
+    async with katsdpmetawriter.get_s3_connection(botocore_dict) as conn:
+        assert conn is not None
 
 
-def test_get_s3_connection_bad_access_key(s3_args, caplog):
+async def test_get_s3_connection_bad_access_key(s3_args, caplog):
     s3_args.access_key = 'wrong'
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     with caplog.at_level(logging.ERROR):
-        conn = katsdpmetawriter.get_s3_connection(boto_dict)
-    assert conn is None
+        async with katsdpmetawriter.get_s3_connection(botocore_dict) as conn:
+            assert conn is None
     assert 'not a valid S3 user' in caplog.text
 
 
-def test_get_s3_connection_bad_secret_key(s3_args, caplog):
+async def test_get_s3_connection_bad_secret_key(s3_args, caplog):
     s3_args.secret_key = 'wrong'
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     with caplog.at_level(logging.ERROR):
-        conn = katsdpmetawriter.get_s3_connection(boto_dict)
-    assert conn is None
+        async with katsdpmetawriter.get_s3_connection(botocore_dict) as conn:
+            assert conn is None
     assert 'secret key is not valid' in caplog.text
 
 
-def test_get_s3_connection_no_permissions(s3_args, caplog):
+async def test_get_s3_connection_no_permissions(s3_args, caplog):
     s3_args.access_key = NOBODY_USER.access_key
     s3_args.secret_key = NOBODY_USER.secret_key
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     with caplog.at_level(logging.ERROR):
-        conn = katsdpmetawriter.get_s3_connection(boto_dict)
-    assert conn is None
+        async with katsdpmetawriter.get_s3_connection(botocore_dict) as conn:
+            assert conn is None
     assert 'has no permissions' in caplog.text
 
 
-def test_get_s3_connection_bad_host(s3_args, caplog):
+async def test_get_s3_connection_bad_host(s3_args, caplog):
     s3_args.s3_host = 'test.invalid'
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     with caplog.at_level(logging.ERROR):
-        conn = katsdpmetawriter.get_s3_connection(boto_dict)
-    assert conn is None
+        async with katsdpmetawriter.get_s3_connection(botocore_dict) as conn:
+            assert conn is None
     assert 'Please check network and host address' in caplog.text
 
 
-def test_get_s3_connection_fail_on_boto(s3_args, caplog):
+async def test_get_s3_connection_fail_on_boto(s3_args, caplog):
     s3_args.secret_key = 'wrong'
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     with caplog.at_level(logging.ERROR):
-        with pytest.raises(boto.exception.S3ResponseError):
-            katsdpmetawriter.get_s3_connection(boto_dict, fail_on_boto=True)
+        with pytest.raises(botocore.exceptions.ClientError):
+            async with katsdpmetawriter.get_s3_connection(botocore_dict, fail_on_boto=True):
+                pass
     assert 'secret key is not valid' in caplog.text
 
 
-def key_info(telstate, key):
+async def key_info(telstate, key):
     """Get all information about a telescope state key."""
-    key_type = telstate.key_type(key)
+    key_type = await telstate.key_type(key)
     if key_type == katsdptelstate.KeyType.MUTABLE:
-        value = telstate.get_range(key, st=0)
+        value = await telstate.get_range(key, st=0)
     else:
-        value = telstate.get(key)
+        value = await telstate.get(key)
     return (key_type, value)
 
 
-def test_write_rdb_local_lite(telstate, tmp_path_factory, mocker):
+def _load_from_file(telstate, file):
+    """Load an asynchronous telescope state from file.
+
+    This is not supported in general by katsdptelstate, but is possible when
+    the backend is a memory backend.
+    """
+    assert isinstance(telstate.backend, katsdptelstate.aio.memory.MemoryBackend)
+    sync_telstate = katsdptelstate.TelescopeState(telstate.backend.to_sync())
+    sync_telstate.load_from_file(file)
+
+
+async def test_write_rdb_local_lite(telstate, tmp_path_factory, mocker):
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb'
     ctx = mocker.MagicMock()
-    rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+    rate_bytes, key_errors = await katsdpmetawriter._write_rdb(
         ctx, telstate, str(path), CBID, STREAM_NAME,
-        boto_dict=None, key_name=None, lite=True
+        botocore_dict=None, key_name=None, lite=True
     )
     assert rate_bytes is None, 'rate_bytes does not apply with local-only dump'
     assert key_errors > 0      # We didn't fully populate dummy telstate
     ctx.inform.assert_called()
 
-    telstate2 = katsdptelstate.TelescopeState()
-    telstate2.load_from_file(path)
-    for key in telstate.keys():
+    telstate2 = katsdptelstate.aio.TelescopeState()
+    _load_from_file(telstate2, path)
+    for key in await telstate.keys():
         if 'sdp_archived_streams' in key or 'another' in key:    # Not in the lite list
-            assert key not in telstate2
+            assert not await telstate2.exists(key)
         else:
-            assert key_info(telstate, key) == key_info(telstate2, key)
-    assert telstate2.get('capture_block_id') == CBID
-    assert telstate2.get('stream_name') == STREAM_NAME
+            assert await key_info(telstate, key) == await key_info(telstate2, key)
+    assert await telstate2.get('capture_block_id') == CBID
+    assert await telstate2.get('stream_name') == STREAM_NAME
 
 
-def test_write_rdb_s3_full(telstate, s3_args, tmp_path_factory, mocker):
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+async def test_write_rdb_s3_full(telstate, s3_args, tmp_path_factory, mocker):
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
     mocker.patch('katsdpmetawriter.timer', side_effect=[100.0, 105.0])
-    rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+    rate_bytes, key_errors = await katsdpmetawriter._write_rdb(
         ctx, telstate, str(path), CBID, STREAM_NAME,
-        boto_dict=boto_dict, key_name='dump.rdb', lite=False
+        botocore_dict=botocore_dict, key_name='dump.rdb', lite=False
     )
     assert rate_bytes == path.stat().st_size / 5.0
     assert key_errors == 0, 'Should never be key errors with a full dump'
     ctx.inform.assert_called()
 
-    s3_conn = boto.connect_s3(**boto_dict)
-    bucket = s3_conn.get_bucket(CBID)
-    obj_key = bucket.get_key('dump.rdb')
-    assert obj_key is not None, 'Dump not found in S3'
-    assert obj_key.get_contents_as_string() == path.read_bytes()
+    session = botocore.session.Session()
+    s3_conn = session.create_client('s3', **botocore_dict)
+    assert s3_conn.get_object(Bucket=CBID, Key='dump.rdb')['Body'].read() == path.read_bytes()
 
-    telstate2 = katsdptelstate.TelescopeState()
-    telstate2.load_from_file(path)
-    for key in telstate.keys():
-        assert key_info(telstate, key) == key_info(telstate2, key)
-    assert telstate2.get('capture_block_id') == CBID
-    assert telstate2.get('stream_name') == STREAM_NAME
-    assert len(telstate2.keys()) == len(telstate.keys()) + 2
+    telstate2 = katsdptelstate.aio.TelescopeState()
+    _load_from_file(telstate2, path)
+    for key in await telstate.keys():
+        assert await key_info(telstate, key) == await key_info(telstate2, key)
+    assert await telstate2.get('capture_block_id') == CBID
+    assert await telstate2.get('stream_name') == STREAM_NAME
+    assert len(await telstate2.keys()) == len(await telstate.keys()) + 2
 
 
-def test_write_rdb_zero_keys(telstate, tmp_path_factory, mocker, caplog):
+async def test_write_rdb_zero_keys(telstate, tmp_path_factory, mocker, caplog):
     ctx = mocker.MagicMock()
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
-    telstate.clear()
+    await telstate.clear()
     with caplog.at_level(logging.ERROR):
-        rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+        rate_bytes, key_errors = await katsdpmetawriter._write_rdb(
             ctx, telstate, str(path), CBID, STREAM_NAME,
-            boto_dict=None, key_name=None, lite=False
+            botocore_dict=None, key_name=None, lite=False
         )
     assert rate_bytes is None
     assert key_errors == 0
@@ -299,53 +307,56 @@ def test_write_rdb_zero_keys(telstate, tmp_path_factory, mocker, caplog):
     assert 'No valid telstate keys' in caplog.text
 
 
-def test_write_rdb_lost_connection(telstate, tmp_path_factory, mocker, caplog):
+async def test_write_rdb_lost_connection(telstate, tmp_path_factory, mocker, caplog):
+    @asynccontextmanager
+    async def failed_get_s3_connection(*args, **kwargs):
+        yield None
+
     s3_args = argparse.Namespace(
         access_key=ADMIN_USER.access_key,
         secret_key=ADMIN_USER.secret_key,
         s3_host='test.invalid',
         s3_port=0
     )
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
-    mocker.patch('katsdpmetawriter.get_s3_connection', return_value=None)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
+    mocker.patch('katsdpmetawriter.get_s3_connection', failed_get_s3_connection)
 
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
     with caplog.at_level(logging.ERROR):
-        rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+        rate_bytes, key_errors = await katsdpmetawriter._write_rdb(
             ctx, telstate, str(path), CBID, STREAM_NAME,
-            boto_dict=boto_dict, key_name='dump.rdb', lite=False
+            botocore_dict=botocore_dict, key_name='dump.rdb', lite=False
         )
     assert rate_bytes is None
     assert 'Unable to store RDB dump' in caplog.text
 
 
-def test_write_rdb_s3_permission_error(telstate, s3_args, tmp_path_factory, mocker, caplog):
+async def test_write_rdb_s3_permission_error(telstate, s3_args, tmp_path_factory, mocker, caplog):
     s3_args.access_key = READONLY_USER.access_key
     s3_args.secret_key = READONLY_USER.secret_key
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args)
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args)
     path = tmp_path_factory.mktemp('dump') / 'dump.rdb.uploading'
     ctx = mocker.MagicMock()
     with caplog.at_level(logging.ERROR):
-        rate_bytes, key_errors = katsdpmetawriter._write_rdb(
+        rate_bytes, key_errors = await katsdpmetawriter._write_rdb(
             ctx, telstate, str(path), CBID, STREAM_NAME,
-            boto_dict=boto_dict, key_name='dump.rdb', lite=False
+            botocore_dict=botocore_dict, key_name='dump.rdb', lite=False
         )
     assert rate_bytes is None
     assert 'does not have permission' in caplog.text
 
 
 @pytest.fixture(params=[True, False])
-async def device_server(request, s3_args, telstate, tmp_path_factory, event_loop):
+async def device_server(request, s3_args, telstate, tmp_path_factory):
     """Create and start a :class:`~.MetaWriterServer`.
 
     It is parametrized by whether to connect it to an S3 server.
     """
     rdb_path = tmp_path_factory.mktemp('dump')
-    executor = concurrent.futures.ThreadPoolExecutor(1)
-    boto_dict = katsdpmetawriter.make_boto_dict(s3_args) if request.param else None
+    botocore_dict = katsdpmetawriter.make_botocore_dict(s3_args) if request.param else None
     server = katsdpmetawriter.MetaWriterServer(
-        '127.0.0.1', 0, event_loop, executor, boto_dict, str(rdb_path), telstate)
+        '127.0.0.1', 0, botocore_dict, str(rdb_path), telstate)
     await server.start()
     yield server
     await server.stop()
@@ -396,12 +407,12 @@ async def test_meta_write_full_single(device_client, device_server, mocker):
     assert f'RDB extract and write for {cs} complete' in informs[1].arguments[0].decode()
     assert f'Full dump meta-data for CB: {cs} written' in informs[2].arguments[0].decode()
 
-    s3 = device_server._boto_dict is not None
+    s3 = device_server._botocore_dict is not None
     if s3:
-        s3_conn = boto.connect_s3(**device_server._boto_dict)
-        bucket = s3_conn.get_bucket(CBID)
-        obj_key = bucket.new_key(f'{cs}.full.rdb')
-        size = len(obj_key.get_contents_as_string())
+        session = botocore.session.Session()
+        client = session.create_client('s3', **device_server._botocore_dict)
+        obj = client.get_object(Bucket=CBID, Key=f'{cs}.full.rdb')
+        size = len(obj['Body'].read())
     else:
         path = pathlib.Path(device_server._rdb_path) / CBID / f'{cs}.full.rdb'
         size = path.stat().st_size
@@ -409,19 +420,19 @@ async def test_meta_write_full_single(device_client, device_server, mocker):
     assert await get_sensor(device_client, 'status') == b'idle'
     assert await get_sensor(device_client, 'last-write-stream') == STREAM_NAME.encode()
     assert await get_sensor(device_client, 'last-write-cbid') == CBID.encode()
-    if device_server._boto_dict:
+    if device_server._botocore_dict:
         assert float(await get_sensor(device_client, 'last-transfer-rate')) == size / 5.0
     else:
         assert await get_sensor(device_client, 'last-transfer-rate') is None
 
 
 async def test_meta_write_too_many(device_client, mocker, event_loop):
-    def slow_write_rdb(*args, **kwargs):
-        result = orig_write_rdb(*args, **kwargs)
-        unblock_write.wait()
+    async def slow_write_rdb(*args, **kwargs):
+        result = await orig_write_rdb(*args, **kwargs)
+        await unblock_write.wait()
         return result
 
-    unblock_write = threading.Event()
+    unblock_write = asyncio.Event()
     orig_write_rdb = katsdpmetawriter._write_rdb
     mocker.patch('katsdpmetawriter._write_rdb', slow_write_rdb)
     tasks = []
@@ -438,7 +449,7 @@ async def test_meta_write_too_many(device_client, mocker, event_loop):
 
 
 async def test_meta_writer_no_sdp_archived_streams(device_client, telstate):
-    telstate.delete('sdp_archived_streams')
+    await telstate.delete('sdp_archived_streams')
     with pytest.raises(aiokatcp.FailReply, match='cannot determine available streams'):
         await device_client.request('write-meta', CBID)
 
@@ -470,8 +481,8 @@ async def test_meta_writer_remove_failed(device_client, device_server, mocker, c
     assert 'Failed to remove transferred RDB file' in caplog.text
 
     # Make sure the S3 transfer still worked
-    s3_conn = boto.connect_s3(**device_server._boto_dict)
-    bucket = s3_conn.get_bucket(CBID)
-    obj_key = bucket.new_key(f'{CBID}_{STREAM_NAME}.rdb')
-    size = len(obj_key.get_contents_as_string())
+    session = botocore.session.Session()
+    client = session.create_client('s3', **device_server._botocore_dict)
+    obj = client.get_object(Bucket=CBID, Key=f'{CBID}_{STREAM_NAME}.rdb')
+    size = len(obj['Body'].read())
     assert size > 0

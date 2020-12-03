@@ -48,10 +48,12 @@ import enum
 import pathlib
 from collections import deque
 
-import boto
-import boto.s3.connection
+# async_generator provides a backport of Python 3.7's asynccontextmanager
+from async_generator import asynccontextmanager
+import aiobotocore.config
+import botocore.exceptions
 import katsdptelstate
-from katsdptelstate.rdb_writer import RDBWriter
+from katsdptelstate.aio.rdb_writer import RDBWriter
 from aiokatcp import DeviceServer, Sensor, FailReply
 
 
@@ -125,19 +127,18 @@ def timer():
     return time.monotonic()
 
 
-def make_boto_dict(s3_args):
-    """Create a dict suitable for passing into a boto.connect_s3 call using the supplied args."""
+def make_botocore_dict(s3_args):
+    """Create a dict suitable for passing into aiobotocore using the supplied args."""
     return {
         "aws_access_key_id": s3_args.access_key,
         "aws_secret_access_key": s3_args.secret_key,
-        "host": s3_args.s3_host,
-        "port": s3_args.s3_port,
-        "is_secure": False,
-        "calling_format": boto.s3.connection.OrdinaryCallingFormat()
+        "endpoint_url": f"http://{s3_args.s3_host}:{s3_args.s3_port}",
+        "use_ssl": False,
+        "config": aiobotocore.config.AioConfig(s3={"addressing_style": "path"})
     }
 
 
-def get_lite_keys(telstate, capture_block_id, stream_name):
+async def get_lite_keys(telstate, capture_block_id, stream_name):
     """Uses capture_block_id and stream_name, along with the template
     of keys to store in the lite dump, to build a full list of the keys
     to be dumped.
@@ -148,15 +149,17 @@ def get_lite_keys(telstate, capture_block_id, stream_name):
     keys = []
     for key in LITE_KEYS:
         if key.find('?') >= 0:
-            keys.extend(telstate.keys(filter=key))
+            keys.extend(await telstate.keys(filter=key))
         else:
             keys.append(key.format(cb=capture_block_id, sn=stream_name))
     return keys
 
 
-def get_s3_connection(boto_dict, fail_on_boto=False):
-    """Test the connection to S3 as described in the args, and return
-    the current user id and the connection object.
+@asynccontextmanager
+async def get_s3_connection(botocore_dict, fail_on_boto=False):
+    """Test the connection to S3 as described in the args.
+
+    Return the connection object.
 
     In general we are more concerned with informing the user why the
     connection failed, rather than raising exceptions. Users should always
@@ -170,52 +173,57 @@ def get_s3_connection(boto_dict, fail_on_boto=False):
     s3_conn : S3Connection
         A connection to the s3 endpoint. None if a connection error occurred.
     """
-    s3_conn = boto.connect_s3(**boto_dict)
+    session = aiobotocore.session.get_session()
     try:
         # reliable way to test connection and access keys
-        s3_conn.get_canonical_user_id()
-        return s3_conn
+        async with session.create_client('s3', **botocore_dict) as s3_conn:
+            await s3_conn.list_buckets()
+            yield s3_conn
+            return
     except socket.error as e:
         logger.error(
-            "Failed to connect to S3 host %s:%s. Please check network and host address. (%s)",
-            boto_dict['host'], boto_dict['port'], e)
-    except boto.exception.S3ResponseError as e:
-        if e.error_code == 'InvalidAccessKeyId':
+            "Failed to connect to S3 host %s. Please check network and host address. (%s)",
+            botocore_dict['endpoint_url'], e)
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code')
+        if error_code == 'InvalidAccessKeyId':
             logger.error(
                 "Supplied access key %s is not a valid S3 user.",
-                boto_dict['aws_access_key_id'])
-        if e.error_code == 'SignatureDoesNotMatch':
+                botocore_dict['aws_access_key_id'])
+        elif error_code == 'SignatureDoesNotMatch':
             logger.error("Supplied secret key is not valid for specified user.")
-        if e.status == 403 or e.status == 409:
+        elif error_code == 'AccessDenied':
             logger.error(
                 "Supplied access key (%s) has no permissions on this server.",
-                boto_dict['aws_access_key_id'])
+                botocore_dict['aws_access_key_id'])
+        else:
+            logger.error(e)
         if fail_on_boto:
             raise
-    return None
+    yield None
 
 
-def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
-               boto_dict, key_name, lite=True):
+async def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
+                     botocore_dict, key_name, lite=True):
     """Synchronous code used to create an on-disk dump.
 
-    If a `boto_dict` is supplied, upload the dump to S3, with the name
+    If a `botocore_dict` is supplied, upload the dump to S3, with the name
     `key_name`.
     """
     keys = None
     if lite:
-        keys = get_lite_keys(telstate, capture_block_id, stream_name)
+        keys = await get_lite_keys(telstate, capture_block_id, stream_name)
     logger.info(
         "Writing %s keys to local RDB dump %s",
         str(len(keys)) if lite else "all", dump_filename)
 
-    supplemental_telstate = katsdptelstate.TelescopeState()
-    supplemental_telstate['stream_name'] = stream_name
-    supplemental_telstate['capture_block_id'] = capture_block_id
+    supplemental_telstate = katsdptelstate.aio.TelescopeState()
+    await supplemental_telstate.set('stream_name', stream_name)
+    await supplemental_telstate.set('capture_block_id', capture_block_id)
     with RDBWriter(dump_filename) as rdbw:
-        rdbw.save(telstate, keys)
+        await rdbw.save(telstate, keys)
         if rdbw.keys_written > 0:
-            rdbw.save(supplemental_telstate)
+            await rdbw.save(supplemental_telstate)
     key_errors = rdbw.keys_failed
     if not rdbw.keys_written:
         logger.error("No valid telstate keys found for %s_%s", capture_block_id, stream_name)
@@ -225,45 +233,50 @@ def _write_rdb(ctx, telstate, dump_filename, capture_block_id, stream_name,
         "RDB extract and write for {}_{} complete. {} errors"
         .format(capture_block_id, stream_name, key_errors))
 
-    if not boto_dict:
+    if not botocore_dict:
         return (None, key_errors)
 
-    s3_conn = get_s3_connection(boto_dict)
-    file_size = os.path.getsize(dump_filename)
-
-    if not s3_conn:
-        logger.error("Unable to store RDB dump in S3.")
-        return (None, key_errors)
-    rate_bytes = 0
-    written_bytes = 0
-    try:
-        s3_conn.create_bucket(capture_block_id)
-        bucket = s3_conn.get_bucket(capture_block_id)
-        k = bucket.new_key(key_name)
-        st = timer()
-        written_bytes = k.set_contents_from_filename(dump_filename)
-        rate_bytes = written_bytes / (timer() - st)
-    except boto.exception.S3ResponseError as e:
-        if e.status in {403, 409}:
+    async with get_s3_connection(botocore_dict) as s3_conn:
+        if not s3_conn:
+            logger.error("Unable to store RDB dump in S3.")
+            return (None, key_errors)
+        file_size = os.path.getsize(dump_filename)
+        rate_bytes = 0
+        written_bytes = 0
+        try:
+            await s3_conn.create_bucket(Bucket=capture_block_id)
+            st = timer()
+            with open(dump_filename, 'rb') as dump_data:
+                await s3_conn.put_object(
+                    Bucket=capture_block_id,
+                    Key=key_name,
+                    Body=dump_data)
+                written_bytes = dump_data.tell()
+            rate_bytes = written_bytes / (timer() - st)
+        except botocore.exceptions.ClientError as e:
+            status = e.response.get('ResponseMetadata', {}).get('HTTPStatusCode')
+            if status in {403, 409}:
+                logger.error(
+                    "Unable to store RDB dump as access key %s "
+                    "does not have permission to write to bucket %s",
+                    botocore_dict["aws_access_key_id"], capture_block_id)
+                return (None, key_errors)
+            elif status == 404:
+                logger.error(
+                    "Unable to store RDB dump as the bucket %s or key %s has been lost.",
+                    capture_block_id, key_name)
+                return (None, key_errors)
+            else:
+                logger.error(
+                    "Error writing to %s/%s in S3",
+                    capture_block_id, key_name, exc_info=True)
+                return (None, key_errors)
+        if written_bytes != file_size:
             logger.error(
-                "Unable to store RDB dump as access key %s "
-                "does not have permission to write to bucket %s",
-                boto_dict["aws_access_key_id"], capture_block_id)
+                "Incorrect number of bytes written (%d/%d) when writing RDB dump %s",
+                written_bytes, file_size, dump_filename)
             return (None, key_errors)
-        elif e.status == 404:
-            logger.error(
-                "Unable to store RDB dump as the bucket %s or key %s has been lost.",
-                capture_block_id, key_name)
-            return (None, key_errors)
-        else:
-            logger.error("Error writing to %s/%s in S3", capture_block_id, key_name, exc_info=True)
-            return (None, key_errors)
-    if written_bytes != file_size:
-        logger.error(
-            "Incorrect number of bytes written (%d/%d) when writing RDB dump %s",
-            written_bytes, file_size, dump_filename)
-        return (None, key_errors)
-    return (rate_bytes, key_errors)
+        return (rate_bytes, key_errors)
 
 
 class DeviceStatus(enum.Enum):
@@ -275,10 +288,9 @@ class MetaWriterServer(DeviceServer):
     VERSION = "sdp-meta-writer-0.1"
     BUILD_STATE = "katsdpmetawriter-" + __version__
 
-    def __init__(self, host, port, loop, executor, boto_dict, rdb_path, telstate):
-        self._boto_dict = boto_dict
+    def __init__(self, host, port, botocore_dict, rdb_path, telstate):
+        self._botocore_dict = botocore_dict
         self._async_tasks = deque()
-        self._executor = executor
         self._rdb_path = rdb_path
         self._telstate = telstate
 
@@ -301,7 +313,7 @@ class MetaWriterServer(DeviceServer):
             float, "last-dump-duration",
             "Time taken to write the last dump to disk. (prometheus: gauge)", "s")
 
-        super().__init__(host, port, loop=loop)
+        super().__init__(host, port)
 
         self._build_state_sensor.set_value(self.BUILD_STATE)
         self.sensors.add(self._build_state_sensor)
@@ -356,9 +368,9 @@ class MetaWriterServer(DeviceServer):
         # regardless of the stream selected.
         # The full capture_block_stream_name is used as the bucket for payload
         # data for the particular stream.
-        (rate_b, key_errors) = await self.loop.run_in_executor(
-            self._executor, _write_rdb, ctx, self._telstate, dump_filename,
-            capture_block_id, stream_name, self._boto_dict, basename, lite)
+        (rate_b, key_errors) = await _write_rdb(
+            ctx, self._telstate, dump_filename,
+            capture_block_id, stream_name, self._botocore_dict, basename, lite)
         et = timer()
         sensor_timestamp = time.time()
         self._last_write_stream_sensor.set_value(stream_name, timestamp=sensor_timestamp)
@@ -398,7 +410,7 @@ class MetaWriterServer(DeviceServer):
         rate_per_stream = {}
         for stream in streams:
             task = asyncio.ensure_future(
-                self._write_meta(ctx, capture_block_id, stream, lite), loop=self.loop)
+                self._write_meta(ctx, capture_block_id, stream, lite))
             self._device_status_sensor.set_value(DeviceStatus.QUEUED)
             # we risk queue depth expansion at this point, but we are really
             # only checking to prevent outrageous failures.
@@ -446,12 +458,12 @@ class MetaWriterServer(DeviceServer):
         """
         self._fail_if_busy()
         if not stream_name:
-            streams = self._telstate.get('sdp_archived_streams')
+            streams = await self._telstate.get('sdp_archived_streams')
             if not streams:
                 raise FailReply(
                     "No stream specified, and cannot determine available streams from telstate.")
             streams = [stream for stream in streams
-                       if self._telstate.view(stream).get('stream_type') == 'sdp.vis']
+                       if await self._telstate.view(stream).get('stream_type') == 'sdp.vis']
         else:
             streams = [stream_name]
 

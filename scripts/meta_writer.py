@@ -23,7 +23,7 @@ import asyncio
 import signal
 
 import aioredis
-import katsdptelstate.aio
+import katsdptelstate.aio.redis
 import katsdpservices
 import katsdpmetawriter
 

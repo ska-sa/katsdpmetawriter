@@ -100,6 +100,8 @@ async def main():
     for sig in [signal.SIGINT, signal.SIGTERM]:
         loop.add_signal_handler(sig, lambda: on_shutdown(loop, server))
     await server.join()
+    telstate.backend.close()
+    await telstate.backend.wait_closed()
 
 
 if __name__ == '__main__':

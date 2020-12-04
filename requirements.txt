@@ -2,7 +2,7 @@ aiobotocore==1.1.2
 aiohttp                   # via aiobotocore
 aioitertools==0.7.1       # via aiobotocore
 aiokatcp
-aioredis                  # via katsdptelstate
+aioredis==1.3.1           # via katsdptelstate
 async_generator==1.10
 async-timeout             # via aiokatcp, aiohttp
 attrs                     # via aiohttp
@@ -11,6 +11,8 @@ chardet                   # via aiohttp
 decorator                 # via aiokatcp
 docutils                  # via botocore
 hiredis
+idna                      # via yarl
+idna-ssl                  # via aiohttp
 jmespath                  # via botocore
 katversion
 msgpack                   # via katsdptelstate

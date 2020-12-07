@@ -21,8 +21,9 @@ import sys
 import logging
 import asyncio
 import signal
-from concurrent.futures import ThreadPoolExecutor
 
+import aioredis
+import katsdptelstate.aio.redis
 import katsdpservices
 import katsdpmetawriter
 
@@ -34,14 +35,12 @@ def on_shutdown(loop, server):
     server.halt()
 
 
-async def run(loop, server):
-    await server.start()
-    for sig in [signal.SIGINT, signal.SIGTERM]:
-        loop.add_signal_handler(sig, lambda: on_shutdown(loop, server))
-    await server.join()
+async def get_async_telstate(endpoint: katsdptelstate.endpoint.Endpoint):
+    client = await aioredis.create_redis_pool(f'redis://{endpoint.host}:{endpoint.port}')
+    return katsdptelstate.aio.TelescopeState(katsdptelstate.aio.redis.RedisBackend(client))
 
 
-if __name__ == '__main__':
+async def main():
     katsdpservices.setup_logging()
     logger = logging.getLogger("katsdpmetawriter")
     katsdpservices.setup_restart()
@@ -78,30 +77,34 @@ if __name__ == '__main__':
         logger.error("Specified RDB path, %s, does not exist.", args.rdb_path)
         sys.exit(2)
 
-    boto_dict = None
+    botocore_dict = None
     if args.store_s3:
-        boto_dict = katsdpmetawriter.make_boto_dict(args)
-        s3_conn = katsdpmetawriter.get_s3_connection(boto_dict, fail_on_boto=True)
-        if s3_conn:
-            user_id = s3_conn.get_canonical_user_id()
-            s3_conn.close()
-            # we rebuild the connection each time we want to write a meta-data dump
-            logger.info("Successfully tested connection to S3 endpoint as %s.", user_id)
-        else:
-            logger.warning(
-                "S3 endpoint %s:%s not available. Files will only be written locally.",
-                args.s3_host, args.s3_port)
+        botocore_dict = katsdpmetawriter.make_botocore_dict(args)
+        async with katsdpmetawriter.get_s3_connection(botocore_dict, fail_on_boto=True) as s3_conn:
+            if s3_conn:
+                # we rebuild the connection each time we want to write a meta-data dump
+                logger.info("Successfully tested connection to S3 endpoint.")
+            else:
+                logger.warning(
+                    "S3 endpoint %s:%s not available. Files will only be written locally.",
+                    args.s3_host, args.s3_port)
     else:
         logger.info("Running in disk only mode. RDB dumps will not be written to S3")
 
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(3)
-
+    telstate = await get_async_telstate(args.telstate_endpoint)
     server = katsdpmetawriter.MetaWriterServer(
-        args.host, args.port, loop, executor, boto_dict,
-        args.rdb_path, args.telstate)
+        args.host, args.port, botocore_dict, args.rdb_path, telstate)
     logger.info("Started meta-data writer server.")
+    loop = asyncio.get_event_loop()
+    await server.start()
+    for sig in [signal.SIGINT, signal.SIGTERM]:
+        loop.add_signal_handler(sig, lambda: on_shutdown(loop, server))
+    await server.join()
+    telstate.backend.close()
+    await telstate.backend.wait_closed()
 
-    loop.run_until_complete(run(loop, server))
-    executor.shutdown()
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
     loop.close()

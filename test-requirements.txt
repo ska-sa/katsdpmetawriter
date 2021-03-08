@@ -2,10 +2,10 @@
 -c requirements.txt
 
 coverage
-katpoint==0.9                   # via katdal
 pytest
 pytest-asyncio==0.14.0
 pytest-cov
 pytest-mock==3.2.0
 
+katpoint @ git+https://github.com/ska-sa/katpoint     # via katdal
 katdal @ git+https://github.com/ska-sa/katdal

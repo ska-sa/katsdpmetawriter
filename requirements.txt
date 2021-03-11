@@ -1,11 +1,9 @@
-# TODO: switch to -c and unpin botocore once katsdpdockerbase updated.
--d https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/master/docker-base-build/base-requirements.txt
+-c https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/master/docker-base-build/base-requirements.txt
 
-aiobotocore==1.1.2
+aiobotocore==1.2.1
 aioitertools==0.7.1       # via aiobotocore
 aiokatcp
 async_generator==1.10
-botocore==1.17.44         # via aiobotocore
 wrapt==1.12.1             # via aiobotocore
 katsdpservices @ git+https://github.com/ska-sa/katsdpservices
 katsdptelstate[aio] @ git+https://github.com/ska-sa/katsdptelstate

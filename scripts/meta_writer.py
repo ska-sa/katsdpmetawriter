@@ -22,7 +22,6 @@ import logging
 import asyncio
 import signal
 
-import aioredis
 import katsdptelstate.aio.redis
 import katsdpservices
 import katsdpmetawriter
@@ -36,8 +35,10 @@ def on_shutdown(loop, server):
 
 
 async def get_async_telstate(endpoint: katsdptelstate.endpoint.Endpoint):
-    client = await aioredis.create_redis_pool(f'redis://{endpoint.host}:{endpoint.port}')
-    return katsdptelstate.aio.TelescopeState(katsdptelstate.aio.redis.RedisBackend(client))
+    backend = await katsdptelstate.aio.redis.RedisBackend.from_url(
+        f'redis://{endpoint.host}:{endpoint.port}'
+    )
+    return katsdptelstate.aio.TelescopeState(backend)
 
 
 async def main():

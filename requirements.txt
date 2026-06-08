@@ -1,4 +1,4 @@
--c https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/master/docker-base-build/base-requirements.txt
+-r https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/master/docker-base-build/base-requirements.txt
 
 aiobotocore==1.2.1
 aioitertools==0.7.1       # via aiobotocore

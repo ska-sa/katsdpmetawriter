@@ -1,9 +1,10 @@
--c https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/master/docker-base-build/base-requirements.txt
+-r https://raw.githubusercontent.com/ska-sa/katsdpdockerbase/uvpipjammy/docker-base-build/base-requirements.txt
 
-aiobotocore==1.2.1
-aioitertools==0.7.1       # via aiobotocore
+aiobotocore==3.10.0
+botocore>=1.43.115,<1.43.118
+aioitertools     
 aiokatcp
 async_generator==1.10
-wrapt==1.12.1             # via aiobotocore
+wrapt
 katsdpservices @ git+https://github.com/ska-sa/katsdpservices
 katsdptelstate[aio] @ git+https://github.com/ska-sa/katsdptelstate

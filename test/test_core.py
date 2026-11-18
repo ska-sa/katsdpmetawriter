@@ -100,16 +100,17 @@ def _s3_server(tmp_path_factory):
                 'admin', 'user', 'add', 'minio', READONLY_USER.access_key, READONLY_USER.secret_key
             )
             server.mc(
-                'admin', 'policy', 'add', 'minio', 'nobody', str(policy_dir / "nobody.json")
+                'admin', 'policy', 'create', 'minio', 'nobody', str(policy_dir / "nobody.json")
             )
             server.mc(
-                'admin', 'policy', 'add', 'minio', 'readonly2', str(policy_dir / "readonly.json")
+                'admin', 'policy', 'create', 'minio', 'readonly2', str(policy_dir / "readonly.json")
             )
             server.mc(
-                'admin', 'policy', 'set', 'minio', 'nobody', f'user={NOBODY_USER.access_key}'
+                'admin', 'policy', 'attach', 'minio', 'nobody', '--user', NOBODY_USER.access_key
             )
             server.mc(
-                'admin', 'policy', 'set', 'minio', 'readonly2', f'user={READONLY_USER.access_key}'
+                'admin', 'policy', 'attach', 'minio', 'readonly2', '--user',
+                READONLY_USER.access_key
             )
         except MissingProgram as exc:
             pytest.skip(str(exc))

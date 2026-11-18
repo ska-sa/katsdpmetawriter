@@ -51,6 +51,7 @@ from collections import deque
 # async_generator provides a backport of Python 3.7's asynccontextmanager
 from async_generator import asynccontextmanager
 import aiobotocore.config
+import aiobotocore.session
 import botocore.exceptions
 import katsdptelstate
 from katsdptelstate.aio.rdb_writer import RDBWriter
@@ -168,7 +169,7 @@ async def get_s3_connection(botocore_dict, fail_on_boto=False):
     connection failed, rather than raising exceptions. Users should always
     check the return value and make appropriate decisions.
 
-    If set, fail_on_boto will not suppress boto exceptions. Used when verifying
+    If set, fail_on_boto will propagate S3 response errors. Used when verifying
     credentials.
 
     Returns
@@ -177,32 +178,33 @@ async def get_s3_connection(botocore_dict, fail_on_boto=False):
         A connection to the s3 endpoint. None if a connection error occurred.
     """
     session = aiobotocore.session.get_session()
-    try:
-        # reliable way to test connection and access keys
-        async with session.create_client('s3', **botocore_dict) as s3_conn:
+    async with session.create_client('s3', **botocore_dict) as s3_conn:
+        try:
+            # Test the connection and access keys before handing the client to the caller.
             await s3_conn.list_buckets()
+        except (socket.error, botocore.exceptions.EndpointConnectionError) as e:
+            logger.error(
+                "Failed to connect to S3 host %s. Please check network and host address. (%s)",
+                botocore_dict['endpoint_url'], e)
+        except botocore.exceptions.ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code')
+            if error_code == 'InvalidAccessKeyId':
+                logger.error(
+                    "Supplied access key %s is not a valid S3 user.",
+                    botocore_dict['aws_access_key_id'])
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error("Supplied secret key is not valid for specified user.")
+            elif error_code == 'AccessDenied':
+                logger.error(
+                    "Supplied access key (%s) has no permissions on this server.",
+                    botocore_dict['aws_access_key_id'])
+            else:
+                logger.error(e)
+            if fail_on_boto:
+                raise
+        else:
             yield s3_conn
             return
-    except socket.error as e:
-        logger.error(
-            "Failed to connect to S3 host %s. Please check network and host address. (%s)",
-            botocore_dict['endpoint_url'], e)
-    except botocore.exceptions.ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code')
-        if error_code == 'InvalidAccessKeyId':
-            logger.error(
-                "Supplied access key %s is not a valid S3 user.",
-                botocore_dict['aws_access_key_id'])
-        elif error_code == 'SignatureDoesNotMatch':
-            logger.error("Supplied secret key is not valid for specified user.")
-        elif error_code == 'AccessDenied':
-            logger.error(
-                "Supplied access key (%s) has no permissions on this server.",
-                botocore_dict['aws_access_key_id'])
-        else:
-            logger.error(e)
-        if fail_on_boto:
-            raise
     yield None
 
 

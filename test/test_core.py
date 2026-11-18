@@ -27,7 +27,7 @@ from async_generator import asynccontextmanager
 import aiokatcp
 import botocore.exceptions
 import katsdptelstate.aio.memory
-from katdal.test.s3_utils import S3User, S3Server, MissingProgram, ProgramFailed
+from katdal.s3_utils import S3User, S3Server, MissingProgram, ProgramFailed
 
 import katsdpmetawriter
 
